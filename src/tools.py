@@ -491,10 +491,13 @@ def _brute_force_bit_rule(
     """Find the bit manipulation rule using per-bit boolean function search.
 
     Strategy:
-    1. Per-bit: 1-input, then 2-input, then 3-input truth-table matching
-    2. Find global sliding-window choice/majority pattern with cross-bit support
-    3. If pattern has high support (>=4 bits), override per-bit answers for covered bits
+    1. Per-bit: 1-input, then 2-input, then 3-input truth-table matching (unanimous)
+    2. Find global sliding-window choice/majority pattern; override if coverage >= 4
+    3. For still-undetermined bits, use any matching choice/majority
+    4. For still-undetermined bits, try 4-input and 5-input with majority vote
     """
+    from itertools import combinations as _combs
+
     BITS = 8
     n_ex = len(inputs)
     input_cols = [tuple((i >> b) & 1 for i in inputs) for b in range(BITS)]
@@ -502,7 +505,7 @@ def _brute_force_bit_rule(
     out_cols = [tuple((o >> b) & 1 for o in outputs) for b in range(BITS)]
     result_bits = [None] * BITS
 
-    def _try_n_input(bit_positions: list[int], out_col: tuple) -> int | None:
+    def _try_n_input(bit_positions, out_col: tuple) -> int | None:
         cols = [input_cols[p] for p in bit_positions]
         t_vals = [target_bits[p] for p in bit_positions]
         observed: dict[tuple, int] = {}
@@ -517,7 +520,6 @@ def _brute_force_bit_rule(
         return observed.get(target_key)
 
     # Phase 1: full per-bit search (1-input, 2-input, 3-input)
-    # For 2-input+, only commit when ALL matching functions agree on target value.
     for out_pos in range(BITS):
         oc = out_cols[out_pos]
         if all(b == 0 for b in oc):
@@ -527,7 +529,6 @@ def _brute_force_bit_rule(
             result_bits[out_pos] = 1
             continue
 
-        # 1-input (unambiguous: only one function can match per input bit)
         for a in range(BITS):
             val = _try_n_input([a], oc)
             if val is not None:
@@ -536,7 +537,6 @@ def _brute_force_bit_rule(
         if result_bits[out_pos] is not None:
             continue
 
-        # 2-input: collect ALL matches, only commit if unanimous
         vals_2: set[int] = set()
         for a in range(BITS):
             for b in range(a, BITS):
@@ -547,7 +547,6 @@ def _brute_force_bit_rule(
             result_bits[out_pos] = vals_2.pop()
             continue
 
-        # 3-input: collect ALL matches, only commit if unanimous
         vals_3: set[int] = set()
         for a in range(BITS):
             for b in range(a + 1, BITS):
@@ -558,7 +557,7 @@ def _brute_force_bit_rule(
         if len(vals_3) == 1:
             result_bits[out_pos] = vals_3.pop()
 
-    # Phase 2: find the best global sliding-window choice/majority pattern
+    # Phase 2: global sliding-window choice/majority pattern
     best_pattern: dict[int, int] | None = None
     best_coverage = 0
     for oa in range(BITS):
@@ -569,7 +568,6 @@ def _brute_force_bit_rule(
                 for func in [_choice, _majority]:
                     pvals: dict[int, int] = {}
                     coverage = 0
-                    ok = True
                     for out_pos in range(BITS):
                         a = (out_pos + oa) % BITS
                         b = (out_pos + ob) % BITS
@@ -585,39 +583,35 @@ def _brute_force_bit_rule(
                         best_coverage = coverage
                         best_pattern = dict(pvals)
 
-    # Override per-bit answers if pattern has high support (>=4 bits covered)
     if best_pattern and best_coverage >= 4:
         for pos, val in best_pattern.items():
             result_bits[pos] = val
 
-    # Phase 3: for any still-undetermined bits, use any matching choice/majority
+    # Phase 3: cascading majority vote (prefer lowest arity that has a winner)
     for out_pos in range(BITS):
         if result_bits[out_pos] is not None:
             continue
-        for oa in range(BITS):
-            for ob in range(BITS):
-                for oc in range(BITS):
-                    if oa == ob == oc:
-                        continue
-                    for func in [_choice, _majority]:
-                        a = (out_pos + oa) % BITS
-                        b = (out_pos + ob) % BITS
-                        c = (out_pos + oc) % BITS
-                        computed = tuple(
-                            func(input_cols[a][k], input_cols[b][k], input_cols[c][k])
-                            for k in range(n_ex)
-                        )
-                        if computed == out_cols[out_pos]:
-                            result_bits[out_pos] = func(
-                                target_bits[a], target_bits[b], target_bits[c]
-                            )
-                            break
-                    if result_bits[out_pos] is not None:
-                        break
-                if result_bits[out_pos] is not None:
-                    break
-            if result_bits[out_pos] is not None:
+        oc = out_cols[out_pos]
+        for arity in (2, 3, 4, 5):
+            votes = {0: 0, 1: 0}
+            for combo in _combs(range(BITS), arity):
+                val = _try_n_input(combo, oc)
+                if val is not None:
+                    votes[val] += 1
+            total = votes[0] + votes[1]
+            if total > 0 and votes[0] != votes[1]:
+                result_bits[out_pos] = 1 if votes[1] > votes[0] else 0
                 break
+        else:
+            # All arities tied or empty; fall back to cumulative vote
+            votes = {0: 0, 1: 0}
+            for arity in (2, 3, 4, 5):
+                for combo in _combs(range(BITS), arity):
+                    val = _try_n_input(combo, oc)
+                    if val is not None:
+                        votes[val] += 1
+            if votes[0] + votes[1] > 0:
+                result_bits[out_pos] = 1 if votes[1] >= votes[0] else 0
 
     if any(b is None for b in result_bits):
         return None
@@ -643,6 +637,98 @@ def solve_bit_manipulation(tool_input: str) -> str:
     if result is not None:
         return format(result, '08b')
     raise ValueError("Could not find consistent bit manipulation rule")
+
+
+def solve_equation_transform(tool_input: str) -> str:
+    """Try programmatic approaches for equation_transform puzzles."""
+    data = json.loads(tool_input)
+    prompt = data["prompt"]
+
+    lines = prompt.strip().split("\n")
+    examples: list[tuple[str, str]] = []
+    target = None
+    for line in lines:
+        line = line.strip()
+        if " = " in line and "Now" not in line and "Alice" not in line and "secret" not in line:
+            parts = line.split(" = ", 1)
+            if len(parts) == 2:
+                examples.append((parts[0], parts[1]))
+        if "determine the result for:" in line:
+            target = line.split("determine the result for:")[-1].strip()
+
+    if not examples or not target:
+        raise ValueError("Could not parse equation_transform puzzle")
+
+    if not all(len(e[0]) == 5 for e in examples) or len(target) != 5:
+        raise ValueError("Non-standard equation format")
+
+    target_op = target[2]
+    t_left, t_right = target[:2], target[3:]
+
+    same_op = [(e[0][:2], e[0][3:], e[1]) for e in examples if e[0][2] == target_op]
+    all_parsed = [(e[0][:2], e[0][2], e[0][3:], e[1]) for e in examples]
+
+    # Strategy 1: concatenation - operator just joins left + right
+    if all(left + right == result for left, _, right, result in all_parsed):
+        return t_left + t_right
+
+    # Strategy 2: same-op concatenation
+    if same_op and all(l + r == res for l, r, res in same_op):
+        return t_left + t_right
+
+    # Strategy 3: per-char modular arithmetic on same-op examples
+    if same_op and all(len(l) == 2 and len(r) == 2 for l, r, _ in same_op):
+        for M in [94, 95, 127, 128, 256]:
+            for offset in [0, 32, 33]:
+                for op_fn in [
+                    lambda a, b: a + b,
+                    lambda a, b: a - b,
+                    lambda a, b: b - a,
+                    lambda a, b: a ^ b,
+                    lambda a, b: a * b,
+                ]:
+                    fits = True
+                    for l, r, res in same_op:
+                        computed = ""
+                        for i in range(min(len(l), len(r), len(res))):
+                            v = (op_fn(ord(l[i]), ord(r[i])) + offset) % M
+                            if v < 32 or v > 126 or chr(v) != res[i]:
+                                fits = False
+                                break
+                            computed += chr(v)
+                        if not fits or computed != res:
+                            fits = False
+                            break
+                    if fits:
+                        answer = ""
+                        for i in range(min(len(t_left), len(t_right))):
+                            v = (op_fn(ord(t_left[i]), ord(t_right[i])) + offset) % M
+                            answer += chr(v)
+                        return answer
+
+    # Strategy 4: global char substitution on full input (without operator)
+    char_map: dict[str, str] = {}
+    sub_ok = True
+    for left, _, right, result in all_parsed:
+        full = left + right
+        if len(full) != len(result):
+            sub_ok = False
+            break
+        for i in range(len(full)):
+            if full[i] in char_map:
+                if char_map[full[i]] != result[i]:
+                    sub_ok = False
+                    break
+            else:
+                char_map[full[i]] = result[i]
+        if not sub_ok:
+            break
+    if sub_ok:
+        t_full = t_left + t_right
+        if all(c in char_map for c in t_full):
+            return "".join(char_map[c] for c in t_full)
+
+    raise ValueError("No programmatic pattern found for equation_transform")
 
 
 # ===================================================================
@@ -681,6 +767,7 @@ TOOL_REGISTRY: dict[str, callable] = {
     "solve_numeral_conversion": solve_numeral_conversion,
     "solve_cipher_decryption": solve_cipher_decryption,
     "solve_bit_manipulation": solve_bit_manipulation,
+    "solve_equation_transform": solve_equation_transform,
 }
 
 

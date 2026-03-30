@@ -1,3 +1,6 @@
+"""Decompose node: on first pass, uses the DAG already built by classify.
+On retries (solver failure), generates a new plan via LLM or majority-vote.
+"""
 from __future__ import annotations
 
 import json
@@ -7,9 +10,7 @@ import ollama
 
 from src.state import GraphState, ThoughtNode, FailureRecord
 
-# ---------------------------------------------------------------------------
-# Compact system prompt with one few-shot example per puzzle type
-# ---------------------------------------------------------------------------
+# ── LLM decompose prompt (used only on retries / unknown types) ────────
 
 DECOMPOSE_SYSTEM_PROMPT = """\
 You decompose puzzles into a DAG of steps. Output ONLY a JSON array.
@@ -35,22 +36,6 @@ Prompt: "...For t = 1.37s, distance = 14.92 m\\nFor t = 4.27s, distance = 144.96
   {"id": "get_g", "question": "Compute g from observations", "depends_on": ["extract"], "tool": "ask_llm", "tool_input": null},
   {"id": "result", "question": "Compute final d", "depends_on": ["get_g", "extract"], "tool": "ask_llm", "tool_input": null}
 ]
-Note: get_g node should ask LLM to compute g=2d/t^2 for each pair and average. result node should compute d=0.5*g*t^2 and round to 2 decimals.
-
-=== EXAMPLE FOR numeral_conversion ===
-Prompt: "...numbers are secretly converted...11 -> XI, 15 -> XV...write the number 38..."
-[
-  {"id": "find_number", "question": "What number needs to be converted? Look at the last line of the puzzle. Output ONLY the integer.", "depends_on": [], "tool": "ask_llm", "tool_input": null},
-  {"id": "convert", "question": "Convert to Roman", "depends_on": ["find_number"], "tool": "to_roman", "tool_input": "{\\"number\\": {find_number}}"}
-]
-
-=== EXAMPLE FOR unit_conversion ===
-Prompt: "...10.08 m becomes 6.69, 17.83 m becomes 11.83...convert 25.09 m..."
-[
-  {"id": "extract", "question": "List all (input, output) pairs and target value from the puzzle. Format answer as JSON: {pairs: [[in,out],...], target: n}", "depends_on": [], "tool": "ask_llm", "tool_input": null},
-  {"id": "get_factor", "question": "Compute conversion factor", "depends_on": ["extract"], "tool": "ask_llm", "tool_input": null},
-  {"id": "result", "question": "Multiply factor by target and round to 2 decimals", "depends_on": ["get_factor", "extract"], "tool": "ask_llm", "tool_input": null}
-]
 
 === EXAMPLE FOR cipher_decryption ===
 Prompt: "...encryption rules...ucoov pwgtfyoqg -> queen discovers...decrypt: trb wzrswvog"
@@ -66,13 +51,6 @@ Prompt: "...bit manipulation rule transforms 8-bit binary...01010001 -> 11011101
 [
   {"id": "identify_rule", "question": "Analyze ALL input->output pairs. Try XOR, NOT, shifts, rotations. Which single operation transforms every input to its output? State the operation and any constant. Show your work for each pair.", "depends_on": [], "tool": "ask_llm", "tool_input": null},
   {"id": "apply_rule", "question": "Using the rule: {identify_rule}\\n\\nApply it to the target input from the puzzle. Output ONLY the 8-bit binary result.", "depends_on": ["identify_rule"], "tool": "ask_llm", "tool_input": null}
-]
-
-=== EXAMPLE FOR equation_transform ===
-Prompt: "...transformation rules applied to equations...`!*[{ = '\"[`...determine result for: [[-!'"
-[
-  {"id": "identify_rule", "question": "Analyze the input->output examples character by character. Build a substitution map or identify the transformation pattern. Show the mapping for each character.", "depends_on": [], "tool": "ask_llm", "tool_input": null},
-  {"id": "apply_rule", "question": "Using the transformation: {identify_rule}\\n\\nApply it to the target expression. Output ONLY the transformed result.", "depends_on": ["identify_rule"], "tool": "ask_llm", "tool_input": null}
 ]
 
 Output ONLY the JSON array for the given puzzle. No commentary.\
@@ -104,7 +82,6 @@ def _parse_dag_json(raw: str) -> list[ThoughtNode]:
     if fence_match:
         text = fence_match.group(1).strip()
 
-    # Try to find JSON array in the text
     bracket_start = text.find("[")
     bracket_end = text.rfind("]")
     if bracket_start != -1 and bracket_end > bracket_start:
@@ -174,74 +151,42 @@ def _fallback_dag(prompt: str) -> list[ThoughtNode]:
     ]
 
 
-_SOLVER_TOOLS = {
-    "gravity_physics": "solve_gravity_physics",
-    "unit_conversion": "solve_unit_conversion",
-    "numeral_conversion": "solve_numeral_conversion",
-    "cipher_decryption": "solve_cipher_decryption",
-    "bit_manipulation": "solve_bit_manipulation",
-}
-
-
-def _solver_dag(prompt: str, puzzle_type: str) -> list[ThoughtNode]:
-    """Single-node DAG that calls the type-specific solver tool."""
-    tool_name = _SOLVER_TOOLS[puzzle_type]
-    return [
-        ThoughtNode(
-            id="solve",
-            question=f"Solve {puzzle_type} puzzle",
-            depends_on=[],
-            tool=tool_name,
-            tool_input=json.dumps({"prompt": prompt}),
-            answer=None,
-        ),
-    ]
-
-
-_EQ_TRANSFORM_PROMPT = """\
-Analyze this puzzle step by step. The examples show a transformation rule applied to expressions.
-
-IMPORTANT INSTRUCTIONS:
-1. The middle character of each expression is likely the OPERATOR
-2. Group examples by their operator character
-3. For each operator, figure out EXACTLY what it does to the left and right parts
-4. Consider: character substitution, ASCII math, concatenation, deletion, pairwise operations
-5. Apply the discovered rule to the target expression
-6. Output ONLY the final answer string on the last line, nothing else
-
-Puzzle:
-{prompt}
-
-Think step by step. What is the operator in the target? Which example(s) use the same operator? What does that operator do? Apply it and give ONLY the final answer on the last line."""
-
-
 def make_decompose_node(model_name: str, base_url: str):
-    """Factory that returns the decompose node function with the LLM client bound."""
+    """Factory: returns the decompose node with the LLM client bound."""
     client = ollama.Client(host=base_url)
 
     def decompose_node(state: GraphState) -> dict:
         prompt = state["prompt"]
         puzzle_type = state.get("puzzle_type") or "unknown"
         failure_log: list[FailureRecord] = state.get("failure_log") or []
+        existing_dag = state.get("thought_dag")
 
-        # For types with deterministic solvers, skip LLM decompose entirely
-        if puzzle_type in _SOLVER_TOOLS and not failure_log:
-            return {"thought_dag": _solver_dag(prompt, puzzle_type)}
+        # ── first pass: classifier already built the DAG ───────────
+        if existing_dag and not failure_log:
+            return {"thought_dag": existing_dag}
 
-        # For equation_transform, use a specialized direct prompt
-        if puzzle_type == "equation_transform":
+        # ── retry for equation_transform: majority-vote LLM ───────
+        if puzzle_type == "equation_transform" and failure_log:
+            eq_question = (
+                f"{prompt}\n\n"
+                "Look at the examples above. Each 5-character input has an "
+                "operator at position 2 (like * or -).\n"
+                "The target uses the same type of operator as one of the "
+                "examples.\nFind the pattern and apply it.\n\n"
+                "Answer with ONLY the result string, nothing else."
+            )
             return {"thought_dag": [
                 ThoughtNode(
                     id="solve",
-                    question=_EQ_TRANSFORM_PROMPT.format(prompt=prompt),
+                    question=eq_question,
                     depends_on=[],
-                    tool="ask_llm",
-                    tool_input=None,
+                    tool="majority_vote_llm",
+                    tool_input="7",
                     answer=None,
                 ),
             ]}
 
-        # On solver failure (retry), or for unknown types, use LLM decompose
+        # ── retry / unknown: ask LLM to generate a new DAG ────────
         user_msg = _build_user_prompt(prompt, puzzle_type, failure_log)
 
         try:

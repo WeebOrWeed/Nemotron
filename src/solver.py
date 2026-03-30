@@ -61,11 +61,15 @@ def _run_llm_node(
     question = node["question"]
     question = _interpolate_parents(question, dag)
 
-    # Always provide the original puzzle prompt as context
     full_question = (
         f"Original puzzle:\n{original_prompt}\n\n"
         f"Your task:\n{question}"
     )
+
+    n_votes = int(node.get("tool_input") or "1") if node.get("tool") == "majority_vote_llm" else 1
+
+    if n_votes > 1:
+        return _majority_vote(client, model_name, full_question, n_votes)
 
     resp = client.chat(
         model=model_name,
@@ -73,7 +77,7 @@ def _run_llm_node(
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": full_question},
         ],
-        think=False,
+        think=True,
         options={"temperature": 0.6, "top_p": 0.95, "num_predict": 4096},
     )
     text = resp.message.content or ""
@@ -81,6 +85,39 @@ def _run_llm_node(
     if not answer:
         raise ValueError("Empty response from model")
     return answer
+
+
+def _majority_vote(
+    client: ollama.Client,
+    model_name: str,
+    full_question: str,
+    n_votes: int,
+) -> str:
+    """Make multiple LLM calls with varying temperatures and return the most common answer."""
+    from collections import Counter
+    temps = [0.3, 0.5, 0.7, 0.9, 1.0, 0.4, 0.6, 0.8][:n_votes]
+    answers: list[str] = []
+    for temp in temps:
+        try:
+            resp = client.chat(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": full_question},
+                ],
+                think=True,
+                options={"temperature": temp, "top_p": 0.95, "num_predict": 4096},
+            )
+            text = resp.message.content or ""
+            ans = _extract_final_answer(text)
+            if ans:
+                answers.append(ans)
+        except Exception:
+            continue
+    if not answers:
+        raise ValueError("All majority vote attempts failed")
+    counter = Counter(answers)
+    return counter.most_common(1)[0][0]
 
 
 def make_solve_next(model_name: str, base_url: str):

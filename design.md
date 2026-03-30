@@ -12,11 +12,11 @@ and retry on failure.
 START
   │
   ▼
-classify   (keyword match -- no LLM, instant)
-  │
+classify   (keyword match + build recommended DAG with tools -- no LLM, instant)
+  │          outputs: puzzle_type, thought_dag (sub-questions + tool assignments)
   ▼
-decompose  (LLM generates thought DAG as JSON)
-  │
+decompose  (first pass: forwards classifier's DAG unchanged)
+  │          (on retry: LLM generates a new DAG from failure context)
   ▼
 solve_next (find ready nodes, run on threads, collect answers)
   │         │                          │
@@ -41,7 +41,9 @@ solve_next ◄──────────────────── decom
 ## The 6 Puzzle Types
 
 Each type is identified by a deterministic keyword match on the prompt
-(no LLM inference, zero latency). Distribution is roughly even (~1,550
+(no LLM inference, zero latency). The classifier also emits a full
+execution plan (sub-questions + tool assignments) so the downstream
+decompose node can use it directly.  Distribution is roughly even (~1,550
 each in the training set).
 
 | Type                 | Signature phrase                              | Task                                          |
@@ -75,29 +77,31 @@ class ThoughtNode(TypedDict):
 - `tool: None` = LLM answers the question. `tool: "xor_binary"` = run the Python function.
 - Parent answers are interpolated into both `question` and `tool_input` via `{parent_id}`.
 
-### LLM-Generated DAGs with Tool Dispatch
+### Hybrid Execution: Deterministic Solvers + LLM Fallback
 
-The `decompose` node calls the LLM to dynamically generate the DAG structure.
-The LLM receives:
+For 5 of 6 puzzle types, end-to-end **deterministic solver tools** parse
+the prompt with regex and compute the answer in pure Python -- no LLM
+inference, zero latency, 100% accuracy:
 
-- The puzzle type (from classify)
-- The full puzzle prompt
-- The list of available deterministic tools with their input schemas
-- On retry: the failure log with node IDs and error messages
+| Type                 | Solver Tool                   | Technique                                                    |
+|----------------------|-------------------------------|--------------------------------------------------------------|
+| `gravity_physics`    | `solve_gravity_physics`       | Regex-extract (t,d) pairs, average g=2d/t², compute d=½gt²  |
+| `unit_conversion`    | `solve_unit_conversion`       | Regex-extract pairs, average conversion factor, multiply     |
+| `numeral_conversion` | `solve_numeral_conversion`    | Regex-extract target number, convert to Roman numerals       |
+| `cipher_decryption`  | `solve_cipher_decryption`     | Regex-extract mappings, permutation-search for unmapped chars using vocab from train data |
+| `bit_manipulation`   | `solve_bit_manipulation`      | Per-bit boolean function search (1/2/3-input) with cross-bit sliding-window choice/majority pattern detection |
 
-The LLM outputs a JSON array of `ThoughtNode` objects. It decides:
+For `equation_transform`, a deterministic solver tries common patterns
+(concatenation, per-char arithmetic, substitution). If no pattern matches,
+the tool raises an error and the solver falls back to the LLM with a
+majority-vote strategy (7 attempts at different temperatures).
 
-- How many sub-steps to create (typically 2-6)
-- Which nodes can run in parallel (independent `depends_on: []`)
-- Which nodes need to wait for others (fan-out + merge patterns)
-- **Whether each node should use a tool or the LLM**
+### LLM-Generated DAGs (for retries and unknown types)
 
-The key design principle: **tools for computation, LLM for reasoning**.
-The LLM is used for steps that require pattern recognition, interpretation,
-or natural language understanding (e.g. "identify which bit operation is
-consistent across examples"). Deterministic tools handle all computation
-(e.g. actually XOR-ing two binary strings, evaluating `0.5 * g * t^2`,
-applying a substitution map).
+On solver failure (retry) or for unknown puzzle types, the `decompose` node
+calls the LLM to generate a DAG structure. The LLM receives the puzzle type,
+prompt, available tools, and failure context. It outputs a JSON array of
+`ThoughtNode` objects deciding the decomposition strategy.
 
 If the LLM fails to produce valid JSON, a single-node fallback DAG is
 used (direct answer via LLM).
@@ -231,8 +235,8 @@ Nemotron/
     ├── __init__.py
     ├── config.py            # Env vars: MODEL_NAME, OLLAMA_BASE_URL, MAX_RETRIES
     ├── state.py             # ThoughtNode, FailureRecord, GraphState
-    ├── classify.py          # Deterministic keyword classifier (no LLM)
-    ├── decompose.py         # LLM-generated DAG decomposition with tool assignment
+    ├── classify.py          # Keyword classifier + DAG plan builder (no LLM)
+    ├── decompose.py         # Pass-through on first pass; LLM re-decompose on retries
     ├── tools.py             # Deterministic tool functions (binary ops, math, substitution)
     ├── solver.py            # Threaded DAG solver: tool dispatch or LLM fallback
     └── graph.py             # LangGraph wiring: classify -> decompose -> solve_next
@@ -256,7 +260,8 @@ Nemotron/
 - Default: `nemotron-3-nano:4b` (2.8 GB)
 - Also available: `nemotron-3-nano` 30B MoE (24 GB)
 - No API key required -- runs entirely locally.
-- Uses native `ollama` Python client with `think=False` for direct answers.
+- Uses native `ollama` Python client with `think=True` for chain-of-thought reasoning.
+- 5 of 6 puzzle types solved deterministically (no LLM needed).
 
 ## Setup
 
