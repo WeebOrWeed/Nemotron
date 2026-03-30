@@ -363,8 +363,30 @@ def compute_gravity_d(tool_input: str) -> str:
 # End-to-end solvers (parse prompt with regex, compute, return answer)
 # ===================================================================
 
+def _vote_predict(per_obs_values: list[float], target_mult: float,
+                   intervals: list[tuple[float, float]]) -> str:
+    """Majority-vote prediction: each observation's parameter independently
+    predicts the result; the most common rounded answer wins.
+
+    Tiebreaker: interval midpoint, then simple average.
+    """
+    from collections import Counter
+    predictions = [f"{v * target_mult:.2f}" for v in per_obs_values]
+    counts = Counter(predictions)
+    top = counts.most_common(2)
+    if len(top) == 1 or top[0][1] > top[1][1]:
+        return top[0][0]
+    lo = max(a for a, _ in intervals)
+    hi = min(b for _, b in intervals)
+    if lo <= hi:
+        mid = (lo + hi) / 2
+        return f"{mid * target_mult:.2f}"
+    avg = sum(per_obs_values) / len(per_obs_values)
+    return f"{avg * target_mult:.2f}"
+
+
 def solve_gravity_physics(tool_input: str) -> str:
-    """Solve a gravity puzzle end-to-end from the raw prompt."""
+    """Solve a gravity puzzle via per-observation majority vote on g."""
     data = json.loads(tool_input)
     prompt = data["prompt"]
     obs_matches = re.findall(
@@ -377,26 +399,41 @@ def solve_gravity_physics(tool_input: str) -> str:
     if not target_match:
         target_match = re.search(r'for\s+t\s*=\s*([\d.]+)', prompt, re.IGNORECASE)
     target_t = float(target_match.group(1))
-    g_values = [2 * d / (t ** 2) for t, d in observations if t != 0]
-    avg_g = sum(g_values) / len(g_values)
-    d = 0.5 * avg_g * target_t ** 2
-    return f"{d:.2f}"
+
+    g_values = []
+    g_intervals = []
+    for t, d in observations:
+        if t == 0:
+            continue
+        g = 2 * d / (t ** 2)
+        g_values.append(g)
+        half_t2 = 0.5 * t * t
+        g_intervals.append(((d - 0.005) / half_t2, (d + 0.005) / half_t2))
+
+    target_mult = 0.5 * target_t ** 2
+    return _vote_predict(g_values, target_mult, g_intervals)
 
 
 def solve_unit_conversion(tool_input: str) -> str:
-    """Solve a unit conversion puzzle end-to-end from the raw prompt."""
+    """Solve a unit conversion puzzle via per-observation majority vote on factor."""
     data = json.loads(tool_input)
     prompt = data["prompt"]
     pairs = re.findall(r'([\d.]+)\s*m?\s*becomes\s*([\d.]+)', prompt)
     float_pairs = [[float(x), float(y)] for x, y in pairs]
-    factors = [y / x for x, y in float_pairs if x != 0]
-    avg_factor = sum(factors) / len(factors)
+
+    f_values = []
+    f_intervals = []
+    for x, y in float_pairs:
+        if x == 0:
+            continue
+        f_values.append(y / x)
+        f_intervals.append(((y - 0.005) / x, (y + 0.005) / x))
+
     target_match = re.search(
         r'convert.*?(?:measurement)?[:\s]+([\d.]+)\s*m', prompt, re.IGNORECASE
     )
     target = float(target_match.group(1))
-    result = avg_factor * target
-    return f"{result:.2f}"
+    return _vote_predict(f_values, target, f_intervals)
 
 
 def solve_numeral_conversion(tool_input: str) -> str:
@@ -492,6 +529,7 @@ def _brute_force_bit_rule(
 
     Strategy:
     1. Per-bit: 1-input, then 2-input, then 3-input truth-table matching (unanimous)
+    1b. Global shifted 2-input pattern: same truth table for all output bits
     2. Find global sliding-window choice/majority pattern; override if coverage >= 4
     3. For still-undetermined bits, use any matching choice/majority
     4. For still-undetermined bits, try 4-input and 5-input with majority vote
@@ -556,6 +594,44 @@ def _brute_force_bit_rule(
                         vals_3.add(val)
         if len(vals_3) == 1:
             result_bits[out_pos] = vals_3.pop()
+
+    # Phase 1b: global shifted 2-input pattern (fixed offsets, per-bit truth table)
+    if any(b is None for b in result_bits):
+        shifted_found = False
+        for oa in range(BITS):
+            for ob in range(BITS):
+                if oa == ob:
+                    continue
+                pred_bits_shifted = [None] * BITS
+                all_ok = True
+                for out_pos in range(BITS):
+                    ia = (out_pos + oa) % BITS
+                    ib = (out_pos + ob) % BITS
+                    obs: dict[tuple, int] = {}
+                    ok = True
+                    for k in range(n_ex):
+                        key = (input_cols[ia][k], input_cols[ib][k])
+                        if key in obs:
+                            if obs[key] != out_cols[out_pos][k]:
+                                ok = False
+                                break
+                        else:
+                            obs[key] = out_cols[out_pos][k]
+                    if not ok:
+                        all_ok = False
+                        break
+                    tkey = (target_bits[ia], target_bits[ib])
+                    if tkey in obs:
+                        pred_bits_shifted[out_pos] = obs[tkey]
+                    else:
+                        all_ok = False
+                        break
+                if all_ok and None not in pred_bits_shifted:
+                    result_bits = pred_bits_shifted
+                    shifted_found = True
+                    break
+            if shifted_found:
+                break
 
     # Phase 2: global sliding-window choice/majority pattern
     best_pattern: dict[int, int] | None = None
@@ -840,6 +916,76 @@ def solve_equation_transform(tool_input: str) -> str:
                                 return chr(v0) + chr(v1)
                             except (ValueError, ZeroDivisionError):
                                 pass
+
+    # =================================================================
+    # STRATEGY 4b: Symbolic per-char ordinal (variable-length results)
+    # =================================================================
+    if same_op and len(same_op) >= 2:
+        for r_len in sorted(set(len(r) for _, _, r in same_op)):
+            subset = [(l, r, res) for l, r, res in same_op if len(res) == r_len]
+            if len(subset) < 2:
+                continue
+            for M in [94, 95, 127, 128, 256]:
+                for off in [0, 33, 32, -33, -32]:
+                    # Try all pairs of source chars from L[0],L[1],R[0],R[1]
+                    src_pairs = [(0, 2), (0, 3), (1, 2), (1, 3), (2, 0), (2, 1), (3, 0), (3, 1)]
+                    for combo in src_pairs[:]:
+                        if r_len >= 2:
+                            src_pairs_2 = [(0, 2), (0, 3), (1, 2), (1, 3), (2, 0), (2, 1), (3, 0), (3, 1)]
+                        else:
+                            src_pairs_2 = src_pairs
+                    # Try per result position: result[j] = chr((ord(src_a) OP ord(src_b) + off) % M)
+                    per_char_ops_list = [
+                        lambda a, b: a + b,
+                        lambda a, b: a - b,
+                        lambda a, b: b - a,
+                        lambda a, b: a ^ b,
+                        lambda a, b: a | b,
+                        lambda a, b: a & b,
+                    ]
+                    # Build all source chars as L[0],L[1],R[0],R[1]
+                    def get_operand_chars(l, r):
+                        return [ord(l[0]), ord(l[1]), ord(r[0]), ord(r[1])]
+
+                    # For each result position, try all (srcA, srcB, op, M, off)
+                    # to find a consistent mapping
+                    best_pos_maps = []
+                    for j in range(r_len):
+                        found_j = False
+                        for si in range(4):
+                            for sj in range(4):
+                                for op_fn in per_char_ops_list:
+                                    ok = True
+                                    for l, r, res in subset:
+                                        sc = get_operand_chars(l, r)
+                                        try:
+                                            v = (op_fn(sc[si], sc[sj]) + off) % M
+                                            if v < 0 or v > 127 or chr(v) != res[j]:
+                                                ok = False
+                                                break
+                                        except (ValueError, ZeroDivisionError):
+                                            ok = False
+                                            break
+                                    if ok:
+                                        best_pos_maps.append((si, sj, op_fn))
+                                        found_j = True
+                                        break
+                                if found_j:
+                                    break
+                            if found_j:
+                                break
+                        if not found_j:
+                            break
+                    if len(best_pos_maps) == r_len:
+                        tc = get_operand_chars(t_left, t_right)
+                        try:
+                            result_chars = []
+                            for si, sj, op_fn in best_pos_maps:
+                                v = (op_fn(tc[si], tc[sj]) + off) % M
+                                result_chars.append(chr(v))
+                            return "".join(result_chars)
+                        except (ValueError, ZeroDivisionError):
+                            pass
 
     # =================================================================
     # STRATEGY 5: Global char substitution

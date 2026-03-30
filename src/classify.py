@@ -29,12 +29,18 @@ PUZZLE_SIGNATURES: dict[str, str] = {
 _EQ_TRANSFORM_QUESTION = """\
 {prompt}
 
-Look at the examples above. Each 5-character input has an operator at \
-position 2 (like * or -).
-The target uses the same type of operator as one of the examples.
-Find the pattern and apply it.
+INSTRUCTIONS FOR SOLVING:
+1. Each input is 5 chars: chars 0-1 are LEFT, char 2 is the OPERATOR, chars 3-4 are RIGHT.
+2. Group examples by their operator (char at position 2).
+3. Focus on examples sharing the SAME operator as the target.
+4. Look for a consistent transformation from (LEFT, RIGHT) → RESULT:
+   - If chars are digits: try arithmetic (add, subtract, multiply, reverse digits, etc.)
+   - If chars are symbols: compare ASCII/ordinal values; try per-character operations
+     like (ord(L[i]) + ord(R[i])) mod N, XOR, subtraction, etc.
+   - Check if result length varies — it may depend on the operation.
+5. Apply the discovered rule to the target's LEFT and RIGHT operands.
 
-Answer with ONLY the result string, nothing else."""
+Answer with ONLY the result string on the last line, nothing else."""
 
 
 def _plan_gravity(prompt: str) -> list[ThoughtNode]:

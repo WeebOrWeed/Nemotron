@@ -41,7 +41,8 @@ def _solve_single_node(
     try:
         return _run_tool_node(tool_name, node, dag)
     except Exception:
-        # Tool failed -- fall back to LLM for this node
+        if tool_name == "solve_equation_transform":
+            return _eq_transform_llm_fallback(client, model_name, node, dag, original_prompt)
         return _run_llm_node(client, model_name, node, dag, original_prompt)
 
 
@@ -85,6 +86,23 @@ def _run_llm_node(
     if not answer:
         raise ValueError("Empty response from model")
     return answer
+
+
+def _eq_transform_llm_fallback(
+    client: ollama.Client,
+    model_name: str,
+    node: ThoughtNode,
+    dag: list[ThoughtNode],
+    original_prompt: str,
+) -> str:
+    """Specialized LLM fallback for equation_transform: majority vote with 5 calls."""
+    question = node["question"]
+    question = _interpolate_parents(question, dag)
+    full_question = (
+        f"Original puzzle:\n{original_prompt}\n\n"
+        f"Your task:\n{question}"
+    )
+    return _majority_vote(client, model_name, full_question, 5)
 
 
 def _majority_vote(

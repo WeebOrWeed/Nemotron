@@ -8,6 +8,17 @@ from src.config import MODEL_NAME, OLLAMA_BASE_URL, TRAIN_PATH, TEST_PATH, RESUL
 from src.graph import build_graph
 
 
+def _answers_match(answer, expected) -> bool:
+    """Compare answers: exact string match, then numeric fallback for floats."""
+    a, b = str(answer).strip(), str(expected).strip()
+    if a == b:
+        return True
+    try:
+        return abs(float(a) - float(b)) < 0.01
+    except (ValueError, TypeError):
+        return False
+
+
 def _print_dag_trace(output: dict) -> None:
     dag = output.get("thought_dag") or []
     puzzle_type = output.get("puzzle_type", "unknown")
@@ -69,7 +80,7 @@ def run(
             output = {}
 
         elapsed = time.time() - t0
-        match = answer.strip() == str(expected).strip() if has_expected else None
+        match = _answers_match(answer, expected) if has_expected else None
         status = f"{'MATCH' if match else 'MISS'} " if match is not None else ""
         print(f"{status}done ({elapsed:.1f}s)")
 
@@ -88,8 +99,7 @@ def run(
 
     if has_expected:
         matches = sum(
-            1 for r in results
-            if str(r["answer"]).strip() == str(r["expected"]).strip()
+            1 for r in results if _answers_match(r["answer"], r["expected"])
         )
         print(f"Accuracy: {matches}/{len(results)} ({matches/len(results)*100:.1f}%)")
 
