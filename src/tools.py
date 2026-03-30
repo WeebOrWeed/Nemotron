@@ -640,7 +640,14 @@ def solve_bit_manipulation(tool_input: str) -> str:
 
 
 def solve_equation_transform(tool_input: str) -> str:
-    """Try programmatic approaches for equation_transform puzzles."""
+    """Solve equation_transform using the operator-centric compound-operation framework.
+
+    Framework:
+    - Center char (position 2) = operator (defines a compound operation)
+    - Left 2 chars + Right 2 chars = operands
+    - The operator may be a compound of primitives: +, -, *, /, reverse, abs, etc.
+    - Tries numeric strategies (when chars are digits) and symbolic (ordinal-based).
+    """
     data = json.loads(tool_input)
     prompt = data["prompt"]
 
@@ -651,62 +658,192 @@ def solve_equation_transform(tool_input: str) -> str:
         line = line.strip()
         if " = " in line and "Now" not in line and "Alice" not in line and "secret" not in line:
             parts = line.split(" = ", 1)
-            if len(parts) == 2:
+            if len(parts) == 2 and len(parts[0]) == 5:
                 examples.append((parts[0], parts[1]))
         if "determine the result for:" in line:
             target = line.split("determine the result for:")[-1].strip()
 
     if not examples or not target:
         raise ValueError("Could not parse equation_transform puzzle")
-
-    if not all(len(e[0]) == 5 for e in examples) or len(target) != 5:
+    if len(target) != 5:
         raise ValueError("Non-standard equation format")
 
     target_op = target[2]
     t_left, t_right = target[:2], target[3:]
 
-    same_op = [(e[0][:2], e[0][3:], e[1]) for e in examples if e[0][2] == target_op]
-    all_parsed = [(e[0][:2], e[0][2], e[0][3:], e[1]) for e in examples]
+    by_op: dict[str, list[tuple[str, str, str]]] = {}
+    for lhs, rhs in examples:
+        op = lhs[2]
+        by_op.setdefault(op, []).append((lhs[:2], lhs[3:], rhs))
 
-    # Strategy 1: concatenation - operator just joins left + right
-    if all(left + right == result for left, _, right, result in all_parsed):
-        return t_left + t_right
+    same_op = by_op.get(target_op, [])
+    all_parsed = [(lhs[:2], lhs[2], lhs[3:], rhs) for lhs, rhs in examples]
 
-    # Strategy 2: same-op concatenation
+    # --- Helper: reverse a number's digits ---
+    def _rev_num(n: int) -> int:
+        s = str(abs(n))[::-1].lstrip("0") or "0"
+        return int(s) * (1 if n >= 0 else -1)
+
+    # --- Check if all operand chars (excluding operators) are digits ---
+    operand_chars = "".join(l + r for l, _, r, _ in all_parsed) + t_left + t_right
+    is_numeric_puzzle = all(c.isdigit() for c in operand_chars)
+
+    # =================================================================
+    # STRATEGY 1: Concatenation (left + right, works for both modes)
+    # =================================================================
     if same_op and all(l + r == res for l, r, res in same_op):
         return t_left + t_right
+    if all(l + r == res for l, _, r, res in all_parsed):
+        return t_left + t_right
+    if same_op and all(r + l == res for l, r, res in same_op):
+        return t_right + t_left
 
-    # Strategy 3: per-char modular arithmetic on same-op examples
-    if same_op and all(len(l) == 2 and len(r) == 2 for l, r, _ in same_op):
-        for M in [94, 95, 127, 128, 256]:
-            for offset in [0, 32, 33]:
-                for op_fn in [
-                    lambda a, b: a + b,
-                    lambda a, b: a - b,
-                    lambda a, b: b - a,
-                    lambda a, b: a ^ b,
-                    lambda a, b: a * b,
-                ]:
-                    fits = True
-                    for l, r, res in same_op:
-                        computed = ""
-                        for i in range(min(len(l), len(r), len(res))):
-                            v = (op_fn(ord(l[i]), ord(r[i])) + offset) % M
-                            if v < 32 or v > 126 or chr(v) != res[i]:
-                                fits = False
-                                break
-                            computed += chr(v)
-                        if not fits or computed != res:
-                            fits = False
+    # =================================================================
+    # STRATEGY 2: Numeric compound operations
+    # =================================================================
+    if is_numeric_puzzle and same_op:
+        binary_ops = [
+            ("L+R", lambda l, r: l + r),
+            ("L-R", lambda l, r: l - r),
+            ("R-L", lambda l, r: r - l),
+            ("L*R", lambda l, r: l * r),
+            ("L*R-1", lambda l, r: l * r - 1),
+            ("L*R+1", lambda l, r: l * r + 1),
+            ("abs_diff", lambda l, r: abs(l - r)),
+        ]
+        if all(int(r) != 0 for _, r, _ in same_op):
+            binary_ops.append(("L//R", lambda l, r: l // r if r else None))
+            binary_ops.append(("L%R", lambda l, r: l % r if r else None))
+        if all(int(l) != 0 for l, _, _ in same_op):
+            binary_ops.append(("R//L", lambda l, r: r // l if l else None))
+            binary_ops.append(("R%L", lambda l, r: r % l if l else None))
+        binary_ops += [
+            ("gcd", lambda l, r: math.gcd(l, r) if l and r else 0),
+            ("max", lambda l, r: max(l, r)),
+            ("min", lambda l, r: min(l, r)),
+            ("xor", lambda l, r: l ^ r),
+            ("or", lambda l, r: l | r),
+            ("and", lambda l, r: l & r),
+        ]
+
+        def _rev_str(s: str) -> int:
+            """Reverse a 2-digit string then parse: '02' -> '20' -> 20."""
+            return int(s[::-1])
+
+        pre_transforms = [
+            ("rev_both", lambda ls, rs: (_rev_str(ls), _rev_str(rs))),
+            ("as_is", lambda ls, rs: (int(ls), int(rs))),
+            ("swap", lambda ls, rs: (int(rs), int(ls))),
+            ("rev_L", lambda ls, rs: (_rev_str(ls), int(rs))),
+            ("rev_R", lambda ls, rs: (int(ls), _rev_str(rs))),
+        ]
+
+        post_transforms = [
+            ("rev", lambda x: str(abs(x))[::-1].lstrip("0") or "0"),
+            ("neg_rev", lambda x: ("-" if x < 0 else "") + (str(abs(x))[::-1].lstrip("0") or "0")),
+            ("id", str),
+            ("abs", lambda x: str(abs(x))),
+        ]
+
+        first_match = None
+        for _, pre_fn in pre_transforms:
+            for _, op_fn in binary_ops:
+                for _, post_fn in post_transforms:
+                    ok = True
+                    for l_s, r_s, res in same_op:
+                        pl, pr = pre_fn(l_s, r_s)
+                        v = op_fn(pl, pr)
+                        if v is None or post_fn(v) != res:
+                            ok = False
                             break
-                    if fits:
-                        answer = ""
-                        for i in range(min(len(t_left), len(t_right))):
-                            v = (op_fn(ord(t_left[i]), ord(t_right[i])) + offset) % M
-                            answer += chr(v)
-                        return answer
+                    if ok:
+                        pl, pr = pre_fn(t_left, t_right)
+                        v = op_fn(pl, pr)
+                        if v is not None:
+                            pred = post_fn(v)
+                            if len(same_op) >= 2:
+                                return pred
+                            if first_match is None:
+                                first_match = pred
 
-    # Strategy 4: global char substitution on full input (without operator)
+        if first_match is not None:
+            return first_match
+
+        # Numeric concatenation: L_str + R_str as strings
+        if all(l + r == res for l, r, res in same_op):
+            return t_left + t_right
+        if all(r + l == res for l, r, res in same_op):
+            return t_right + t_left
+
+    # =================================================================
+    # STRATEGY 3: Numeric with ALL examples (cross-operator)
+    # =================================================================
+    if is_numeric_puzzle and not same_op:
+        all_ex = [(l, r, res) for l, _, r, res in all_parsed]
+        simple_ops = [
+            lambda l, r: l + r,
+            lambda l, r: l - r,
+            lambda l, r: r - l,
+            lambda l, r: l * r,
+            lambda l, r: l * r - 1,
+            lambda l, r: abs(l - r),
+        ]
+        for op_fn in simple_ops:
+            ok = True
+            for l_s, r_s, res in all_ex:
+                v = op_fn(int(l_s), int(r_s))
+                if str(v) != res:
+                    ok = False
+                    break
+            if ok:
+                return str(op_fn(int(t_left), int(t_right)))
+
+    # =================================================================
+    # STRATEGY 4: Symbolic per-char ordinal operations (2-char output)
+    # =================================================================
+    if same_op:
+        two_char = [(l, r, res) for l, r, res in same_op if len(res) == 2]
+        if two_char and len(two_char) >= 2:
+            per_char_ops = [
+                lambda a, b: a + b,
+                lambda a, b: a - b,
+                lambda a, b: b - a,
+                lambda a, b: a ^ b,
+                lambda a, b: a | b,
+                lambda a, b: a & b,
+                lambda a, b: max(a, b),
+                lambda a, b: min(a, b),
+                lambda a, b: abs(a - b),
+                lambda a, b: a * b,
+            ]
+            for op_fn in per_char_ops:
+                for M in [94, 95, 127, 128, 256]:
+                    for off in [0, 33, 32, -33]:
+                        ok = True
+                        for l, r, res in two_char:
+                            if len(res) != 2:
+                                ok = False
+                                break
+                            try:
+                                v0 = (op_fn(ord(l[0]), ord(r[0])) + off) % M
+                                v1 = (op_fn(ord(l[1]), ord(r[1])) + off) % M
+                                if chr(v0) + chr(v1) != res:
+                                    ok = False
+                                    break
+                            except (ValueError, ZeroDivisionError):
+                                ok = False
+                                break
+                        if ok:
+                            try:
+                                v0 = (op_fn(ord(t_left[0]), ord(t_right[0])) + off) % M
+                                v1 = (op_fn(ord(t_left[1]), ord(t_right[1])) + off) % M
+                                return chr(v0) + chr(v1)
+                            except (ValueError, ZeroDivisionError):
+                                pass
+
+    # =================================================================
+    # STRATEGY 5: Global char substitution
+    # =================================================================
     char_map: dict[str, str] = {}
     sub_ok = True
     for left, _, right, result in all_parsed:
