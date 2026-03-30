@@ -1,0 +1,16 @@
+---
+description: Keep design.md in sync with structural project changes
+alwaysApply: true
+---
+
+# Update design.md on Structural Changes
+
+Whenever you make a change that affects the project's structure, update `design.md` to reflect it. Structural changes include:
+
+- Adding, removing, or renaming files or directories
+- Adding or removing dependencies
+- Changing the architecture or data flow
+- Adding new CLI flags, environment variables, or configuration options
+- Modifying the graph topology (nodes, edges)
+
+After making the structural change, update the relevant section(s) in `design.md` (e.g., Project Structure tree, Architecture diagram, Key Files, Setup instructions) so the document stays accurate.

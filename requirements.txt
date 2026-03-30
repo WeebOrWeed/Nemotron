@@ -1,0 +1,5 @@
+langgraph>=0.3.0
+langchain-core>=0.3.0
+ollama>=0.6.0
+pandas>=2.2.0
+python-dotenv>=1.0.0
