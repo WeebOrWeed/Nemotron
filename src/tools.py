@@ -1014,6 +1014,94 @@ def solve_equation_transform(tool_input: str) -> str:
     raise ValueError("No programmatic pattern found for equation_transform")
 
 
+def divide_sum_n_json(tool_input: str) -> str:
+    """Parse JSON from the gravity ``sum_and_count`` LLM step.
+
+    If ``d_values`` is present, mean = sum(d_values)/len(d_values) in float
+    (ignores a wrong ``sum`` field). Otherwise uses ``sum`` and ``n``.
+    Returns the mean formatted to 2 decimal places.
+
+    ``tool_input`` is the raw prior-node answer (may include markdown fences).
+    """
+    text = tool_input.strip()
+    for fence in ("```json", "```"):
+        text = text.replace(fence, "")
+    text = text.strip()
+    start = text.find("{")
+    if start < 0:
+        raise ValueError("divide_sum_n_json: no JSON object found")
+    obj, _ = json.JSONDecoder().raw_decode(text[start:])
+    if "d_values" in obj:
+        vals = [float(x) for x in obj["d_values"]]
+        if not vals:
+            raise ValueError("divide_sum_n_json: empty d_values")
+        return f"{sum(vals) / len(vals):.2f}"
+    if "sum" not in obj or "n" not in obj:
+        raise ValueError("divide_sum_n_json: need d_values or sum+n")
+    total = float(obj["sum"])
+    n = int(obj["n"])
+    if n <= 0:
+        raise ValueError("divide_sum_n_json: n must be positive")
+    return f"{total / n:.2f}"
+
+
+def _eval_mul_div_chain(expr: str) -> float:
+    """Evaluate a flat chain of * and / with decimal literals, left-to-right."""
+    s = re.sub(r"\s+", "", expr.strip())
+    if not s:
+        raise ValueError("empty expression")
+    tokens = re.findall(r"[\d.]+|[*/]", s)
+    if not tokens or tokens[0] in "*/":
+        raise ValueError(f"bad chain start: {expr!r}")
+    acc = float(tokens[0])
+    i = 1
+    while i < len(tokens):
+        op = tokens[i]
+        if i + 1 >= len(tokens):
+            raise ValueError(f"trailing operator in {expr!r}")
+        nxt = float(tokens[i + 1])
+        if op == "*":
+            acc *= nxt
+        elif op == "/":
+            acc /= nxt
+        else:
+            raise ValueError(f"unexpected token {op!r} in {expr!r}")
+        i += 2
+    return acc
+
+
+def gravity_geom_mean_chain_exprs(tool_input: str) -> str:
+    """Parse ``d_k = <mul/div chain>`` lines; **geometric** mean in Python, 2dp.
+
+    Computes ``(d_1 * d_2 * ... * d_n) ** (1/n)`` via ``exp(mean(log v)))``
+    for stability. Each RHS uses only ``*``, ``/``, and decimals (no parens).
+    """
+    text = tool_input.strip()
+    for fence in ("```json", "```"):
+        text = text.replace(fence, "")
+    text = text.strip()
+    vals: list[float] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = re.match(r"d_\d+\s*=\s*(.+)", line, re.I)
+        if not m:
+            continue
+        vals.append(_eval_mul_div_chain(m.group(1)))
+    if not vals:
+        raise ValueError(
+            "gravity_geom_mean_chain_exprs: no lines matching 'd_k = <expr>' found"
+        )
+    if any(v <= 0 for v in vals):
+        raise ValueError(
+            "gravity_geom_mean_chain_exprs: all d_k values must be positive"
+        )
+    n = len(vals)
+    geom = math.exp(sum(math.log(v) for v in vals) / n)
+    return f"{geom:.2f}"
+
+
 # ===================================================================
 # Registry
 # ===================================================================
@@ -1044,6 +1132,8 @@ TOOL_REGISTRY: dict[str, callable] = {
     "linear_factor": linear_factor,
     "compute_gravity_g": compute_gravity_g,
     "compute_gravity_d": compute_gravity_d,
+    "divide_sum_n_json": divide_sum_n_json,
+    "gravity_geom_mean_chain_exprs": gravity_geom_mean_chain_exprs,
     # End-to-end solvers
     "solve_gravity_physics": solve_gravity_physics,
     "solve_unit_conversion": solve_unit_conversion,
@@ -1088,6 +1178,12 @@ GENERAL:
 
 - average: Compute the mean of a list of numbers.
   Input: {"values": [15.88, 15.92, 15.87]}
+
+- divide_sum_n_json: Mean from JSON {"d_values": [...]} or {"sum", "n"}.
+
+- gravity_geom_mean_chain_exprs: Geometric mean of d_i from ``d_k = a*b/c/...`` lines
+  (product of all d_k, then n-th root; ``exp(mean(log)))``), 2dp.
+  Input: raw LLM text with one chain per line, only * and / and decimals; all values > 0.
 
 - regex_extract: Extract all regex matches from text (returns JSON array).
   Input: {"text": "t = 1.37s, distance = 14.92 m", "pattern": "[\\\\d.]+"}

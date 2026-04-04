@@ -4,17 +4,21 @@ import time
 
 import pandas as pd
 
-from src.config import MODEL_NAME, OLLAMA_BASE_URL, TRAIN_PATH, TEST_PATH, RESULTS_DIR
+from src.config import (
+    MODEL_NAME, OLLAMA_BASE_URL, TRAIN_PATH, TEST_PATH, RESULTS_DIR,
+    LLM_PROVIDER, DEEPSEEK_API_KEY, DEEPSEEK_MODEL,
+)
 from src.graph import build_graph
+from src.llm_client import LLMClient
 
 
 def _answers_match(answer, expected) -> bool:
-    """Compare answers: exact string match, then numeric fallback for floats."""
+    """Compare answers: exact string match, then numeric within 10^-2 absolute."""
     a, b = str(answer).strip(), str(expected).strip()
     if a == b:
         return True
     try:
-        return abs(float(a) - float(b)) < 0.01
+        return abs(float(a) - float(b)) <= 1e-2 + 1e-9
     except (ValueError, TypeError):
         return False
 
@@ -48,10 +52,19 @@ def run(
     if limit is not None:
         df = df.head(limit)
 
-    print(f"Loaded {len(df)} rows from {dataset_path}")
-    print(f"Model: {MODEL_NAME}  |  Ollama: {OLLAMA_BASE_URL}")
+    llm = LLMClient(
+        provider=LLM_PROVIDER,
+        model_name=MODEL_NAME,
+        ollama_base_url=OLLAMA_BASE_URL,
+        deepseek_api_key=DEEPSEEK_API_KEY,
+        deepseek_model=DEEPSEEK_MODEL,
+    )
+    provider = llm._resolve_provider()
 
-    graph = build_graph(MODEL_NAME, OLLAMA_BASE_URL)
+    print(f"Loaded {len(df)} rows from {dataset_path}")
+    print(f"Provider: {provider}  |  Model: {MODEL_NAME if provider == 'ollama' else DEEPSEEK_MODEL}")
+
+    graph = build_graph(llm)
 
     has_expected = "answer" in df.columns
 
@@ -83,6 +96,8 @@ def run(
         match = _answers_match(answer, expected) if has_expected else None
         status = f"{'MATCH' if match else 'MISS'} " if match is not None else ""
         print(f"{status}done ({elapsed:.1f}s)")
+        if match is False:
+            print(f"    expected: {expected}  |  actual: {answer}")
 
         if verbose and output:
             _print_dag_trace(output)

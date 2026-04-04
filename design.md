@@ -51,7 +51,7 @@ each in the training set).
 | `bit_manipulation`   | "bit manipulation"                            | Deduce bitwise op from examples, apply to new |
 | `cipher_decryption`  | "encryption rules"                            | Build substitution map, decrypt target text   |
 | `equation_transform` | "transformation rules"                        | Build symbol map, transform target equation   |
-| `gravity_physics`    | "gravitational constant"                      | Regress g from d=0.5gt^2 examples, compute d  |
+| `gravity_physics`    | "gravitational constant"                      | Expand t*t; g chains; LLM emits d_i * / lines; Python tool geometric mean (2dp) |
 | `numeral_conversion` | "numeral system"                              | Identify base from examples, convert target   |
 | `unit_conversion`    | "unit conversion"                             | Compute linear factor from examples, convert  |
 
@@ -77,24 +77,31 @@ class ThoughtNode(TypedDict):
 - `tool: None` = LLM answers the question. `tool: "xor_binary"` = run the Python function.
 - Parent answers are interpolated into both `question` and `tool_input` via `{parent_id}`.
 
-### Hybrid Execution: Deterministic Solvers + LLM Fallback
+### Execution Strategy: LLM-per-Step + Deterministic Fallback
 
-For 5 of 6 puzzle types, end-to-end **deterministic solver tools** parse
-the prompt with regex and compute the answer in pure Python -- no LLM
-inference, zero latency, 100% accuracy:
+Each puzzle type is solved by breaking the problem into focused LLM
+sub-steps (the DAG-of-Thoughts approach). This demonstrates reasoning
+technique improvement using Nemotron, which is the goal of the challenge.
+Deterministic solvers are kept as fallbacks on retry.
 
-| Type                 | Solver Tool                   | Technique                                                    |
-|----------------------|-------------------------------|--------------------------------------------------------------|
-| `gravity_physics`    | `solve_gravity_physics`       | Regex-extract (t,d) pairs, average g=2d/t², compute d=½gt²  |
-| `unit_conversion`    | `solve_unit_conversion`       | Regex-extract pairs, average conversion factor, multiply     |
-| `numeral_conversion` | `solve_numeral_conversion`    | Regex-extract target number, convert to Roman numerals       |
-| `cipher_decryption`  | `solve_cipher_decryption`     | Regex-extract mappings, permutation-search for unmapped chars using vocab from train data |
-| `bit_manipulation`   | `solve_bit_manipulation`      | Per-bit boolean function search (1/2/3-input) with cross-bit sliding-window choice/majority pattern detection |
+**LLM-per-step (primary path):**
 
-For `equation_transform`, a deterministic solver tries common patterns
-(concatenation, per-char arithmetic, substitution). If no pattern matches,
-the tool raises an error and the solver falls back to the LLM with a
-majority-vote strategy (7 attempts at different temperatures).
+| Type                 | DAG Nodes (all LLM)                                                |
+|----------------------|--------------------------------------------------------------------|
+| `gravity_physics`    | extract → fill → **expand** → **g = d/0.5/t/t** → symbolic d_i → **LLM: d_k chain lines only** → **tool** `gravity_geom_mean_chain_exprs` (geometric mean ∏d_i^{1/n}, 2dp) |
+| `unit_conversion`    | extract [from,to] pairs + target → avg factor to/from → apply × target |
+| `numeral_conversion` | extract examples JSON + target decimal → infer system → express target |
+| `cipher_decryption`  | extract word pairs ∥ extract ciphertext → decrypt (substitution)   |
+| `bit_manipulation`   | infer rule from all I/O pairs → apply rule to target 8-bit input   |
+| `equation_transform` | extract examples JSON + 5-char target → infer rule → apply to target |
+
+Deterministic helpers (`solve_equation_transform`, `solve_bit_manipulation`,
+etc.) remain in `tools.py`. If `decompose` emits `solve_equation_transform`
+and it fails, `solver` still uses an LLM majority-vote fallback for that node.
+
+> **Migration in progress:** All six puzzle types use LLM-per-step DAGs in
+> `classify`. End-to-end solvers in `tools.py` support retries, optional tool
+> nodes from `decompose`, and targeted fallbacks in `solver`.
 
 ### LLM-Generated DAGs (for retries and unknown types)
 
@@ -153,10 +160,11 @@ upstream nodes.
 
 **Gravity physics** (d = 0.5gt^2):
 
-| Tool               | Purpose                                    |
-|--------------------|--------------------------------------------|
-| `compute_gravity_g`| Compute g from observations: `{"observations": [[1.37, 14.92], ...]}` |
-| `compute_gravity_d`| Compute d from g and t: `{"g": 15.89, "t": 4.41}` -> `"154.62"` |
+| Tool                        | Purpose                                    |
+|-----------------------------|--------------------------------------------|
+| `compute_gravity_g`         | Compute g from observations: `{"observations": [[1.37, 14.92], ...]}` |
+| `compute_gravity_d`         | Compute d from g and t: `{"g": 15.89, "t": 4.41}` -> `"154.62"` |
+| `gravity_geom_mean_chain_exprs` | Parse `d_k =` mul/div chains from LLM text; return geometric mean (2dp) |
 
 **Unit conversion:**
 
@@ -174,8 +182,8 @@ Each `solve_next` iteration:
 4. **On success**: write answers back, loop to find newly unblocked nodes.
 5. **On failure**: record in `failure_log`, increment `retries`, route to `decompose`.
 
-Typical parallelism is 1-3 threads per batch (e.g. `bit_manipulation`
-fans out to 3 concurrent operations).
+Typical parallelism is 1-3 threads per batch (e.g. `cipher_decryption` has
+two root nodes that can run concurrently before `decrypt`).
 
 ## Retry Logic
 
@@ -223,6 +231,7 @@ class GraphState(TypedDict):
 ```
 Nemotron/
 ├── main.py                 # CLI entry point with --verbose DAG trace
+├── trace_row.py            # Optional: run one train id, print each DAG step I/O
 ├── requirements.txt        # Python dependencies
 ├── design.md               # This file
 ├── .env.example            # Template for config overrides
@@ -233,12 +242,13 @@ Nemotron/
 │   └── predictions.csv     # Generated answers
 └── src/
     ├── __init__.py
-    ├── config.py            # Env vars: MODEL_NAME, OLLAMA_BASE_URL, MAX_RETRIES
+    ├── config.py            # Env vars: MODEL_NAME, OLLAMA_BASE_URL, LLM_PROVIDER, etc.
+    ├── llm_client.py        # Unified LLM client (Ollama local / DeepSeek API fallback)
     ├── state.py             # ThoughtNode, FailureRecord, GraphState
     ├── classify.py          # Keyword classifier + DAG plan builder (no LLM)
     ├── decompose.py         # Pass-through on first pass; LLM re-decompose on retries
     ├── tools.py             # Deterministic tool functions (binary ops, math, substitution)
-    ├── solver.py            # Threaded DAG solver: tool dispatch or LLM fallback
+    ├── solver.py            # Threaded DAG solver; LLM nodes store full reply, sink answer = last line
     └── graph.py             # LangGraph wiring: classify -> decompose -> solve_next
 ```
 
@@ -248,6 +258,9 @@ Nemotron/
 |-------------------|--------------------------|--------------------------------------------|
 | `MODEL_NAME`      | `nemotron-3-nano:4b`     | Ollama model tag                           |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL                          |
+| `LLM_PROVIDER`    | `auto`                   | `auto`, `ollama`, or `deepseek`            |
+| `DEEPSEEK_API_KEY`| *(empty)*                | DeepSeek API key (required when provider≠ollama) |
+| `DEEPSEEK_MODEL`  | `deepseek-chat`          | DeepSeek model name                        |
 | `MAX_RETRIES`     | `3`                      | Max re-decompose attempts on failure       |
 | `TRAIN_PATH`      | `data/train.csv`         | Path to training CSV                       |
 | `TEST_PATH`       | `data/test.csv`          | Path to test CSV                           |
@@ -255,13 +268,27 @@ Nemotron/
 
 ## Model
 
-**Nemotron 3 Nano** served locally via [Ollama](https://ollama.com/library/nemotron-3-nano).
+**Primary: Nemotron 3 Nano** served locally via [Ollama](https://ollama.com/library/nemotron-3-nano).
 
 - Default: `nemotron-3-nano:4b` (2.8 GB)
 - Also available: `nemotron-3-nano` 30B MoE (24 GB)
 - No API key required -- runs entirely locally.
 - Uses native `ollama` Python client with `think=True` for chain-of-thought reasoning.
-- 5 of 6 puzzle types solved deterministically (no LLM needed).
+
+**Fallback: DeepSeek** (cloud API, OpenAI-compatible).
+
+- Used when Ollama is unreachable and `LLM_PROVIDER=auto` (default), or
+  when forced via `LLM_PROVIDER=deepseek`.
+- Default model: `deepseek-chat`; set `DEEPSEEK_MODEL=deepseek-reasoner`
+  for built-in chain-of-thought.
+- Requires `DEEPSEEK_API_KEY` in `.env`.
+
+All LLM calls go through the unified `LLMClient` (`src/llm_client.py`),
+which dispatches to the selected backend.
+
+- In **classify**, all six puzzle types use LLM-per-step DAGs; deterministic
+  solvers in `tools.py` are used when `decompose` emits them or for targeted
+  fallbacks (e.g. failed `solve_equation_transform` node).
 
 ## Setup
 
@@ -301,3 +328,7 @@ python main.py --help
 | `--output`  | Output CSV path               | `results/predictions.csv` |
 | `--limit`   | Max rows to process           | all                       |
 | `--verbose` | Print DAG execution trace     | off                       |
+
+When the CSV has an `answer` column, printed **accuracy** treats two answers as
+a match if strings are equal after strip, or if both parse as floats with
+**absolute difference ≤ 10⁻²** (inclusive, plus a tiny epsilon for rounding).

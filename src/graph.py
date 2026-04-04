@@ -5,6 +5,7 @@ from src.classify import classify_node
 from src.decompose import make_decompose_node
 from src.solver import make_solve_next
 from src.config import MAX_RETRIES
+from src.llm_client import LLMClient
 
 
 def _route_after_solve(state: GraphState) -> str:
@@ -22,13 +23,12 @@ def _route_after_solve(state: GraphState) -> str:
     if failure_log and retries > MAX_RETRIES:
         return "done"
 
-    # Unsolved nodes remain but no failure -- keep solving
     return "continue"
 
 
-def build_graph(model_name: str, base_url: str):
-    decompose_node = make_decompose_node(model_name, base_url)
-    solve_next = make_solve_next(model_name, base_url)
+def build_graph(llm: LLMClient):
+    decompose_node = make_decompose_node(llm)
+    solve_next = make_solve_next(llm)
 
     graph = StateGraph(GraphState)
 

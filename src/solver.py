@@ -3,11 +3,10 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import ollama
-
 from src.state import GraphState, ThoughtNode, FailureRecord
 from src.config import MAX_RETRIES
 from src.tools import run_tool
+from src.llm_client import LLMClient
 
 SYSTEM_PROMPT = (
     "You are a precise problem-solving assistant. "
@@ -29,21 +28,20 @@ def _extract_final_answer(text: str) -> str:
 
 
 def _solve_single_node(
-    client: ollama.Client,
-    model_name: str,
+    llm: LLMClient,
     node: ThoughtNode,
     dag: list[ThoughtNode],
     original_prompt: str,
 ) -> str:
     tool_name = node.get("tool")
     if not tool_name or tool_name == "ask_llm":
-        return _run_llm_node(client, model_name, node, dag, original_prompt)
+        return _run_llm_node(llm, node, dag, original_prompt)
     try:
         return _run_tool_node(tool_name, node, dag)
     except Exception:
         if tool_name == "solve_equation_transform":
-            return _eq_transform_llm_fallback(client, model_name, node, dag, original_prompt)
-        return _run_llm_node(client, model_name, node, dag, original_prompt)
+            return _eq_transform_llm_fallback(llm, node, dag, original_prompt)
+        return _run_llm_node(llm, node, dag, original_prompt)
 
 
 def _run_tool_node(tool_name: str, node: ThoughtNode, dag: list[ThoughtNode]) -> str:
@@ -53,8 +51,7 @@ def _run_tool_node(tool_name: str, node: ThoughtNode, dag: list[ThoughtNode]) ->
 
 
 def _run_llm_node(
-    client: ollama.Client,
-    model_name: str,
+    llm: LLMClient,
     node: ThoughtNode,
     dag: list[ThoughtNode],
     original_prompt: str,
@@ -70,27 +67,28 @@ def _run_llm_node(
     n_votes = int(node.get("tool_input") or "1") if node.get("tool") == "majority_vote_llm" else 1
 
     if n_votes > 1:
-        return _majority_vote(client, model_name, full_question, n_votes)
+        return _majority_vote(llm, full_question, n_votes)
 
-    resp = client.chat(
-        model=model_name,
-        messages=[
+    resp = llm.chat(
+        [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": full_question},
         ],
         think=True,
-        options={"temperature": 0.6, "top_p": 0.95, "num_predict": 4096},
+        temperature=0.6,
+        top_p=0.95,
+        max_tokens=4096,
     )
-    text = resp.message.content or ""
-    answer = _extract_final_answer(text)
-    if not answer:
+    text = (resp.content or "").strip()
+    if not text:
         raise ValueError("Empty response from model")
-    return answer
+    # Keep full text for DAG parents; final graph answer uses last line via
+    # _extract_final_answer on the sink only.
+    return text
 
 
 def _eq_transform_llm_fallback(
-    client: ollama.Client,
-    model_name: str,
+    llm: LLMClient,
     node: ThoughtNode,
     dag: list[ThoughtNode],
     original_prompt: str,
@@ -102,12 +100,11 @@ def _eq_transform_llm_fallback(
         f"Original puzzle:\n{original_prompt}\n\n"
         f"Your task:\n{question}"
     )
-    return _majority_vote(client, model_name, full_question, 5)
+    return _majority_vote(llm, full_question, 5)
 
 
 def _majority_vote(
-    client: ollama.Client,
-    model_name: str,
+    llm: LLMClient,
     full_question: str,
     n_votes: int,
 ) -> str:
@@ -117,17 +114,17 @@ def _majority_vote(
     answers: list[str] = []
     for temp in temps:
         try:
-            resp = client.chat(
-                model=model_name,
-                messages=[
+            resp = llm.chat(
+                [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": full_question},
                 ],
                 think=True,
-                options={"temperature": temp, "top_p": 0.95, "num_predict": 4096},
+                temperature=temp,
+                top_p=0.95,
+                max_tokens=4096,
             )
-            text = resp.message.content or ""
-            ans = _extract_final_answer(text)
+            ans = _extract_final_answer(resp.content)
             if ans:
                 answers.append(ans)
         except Exception:
@@ -138,9 +135,8 @@ def _majority_vote(
     return counter.most_common(1)[0][0]
 
 
-def make_solve_next(model_name: str, base_url: str):
+def make_solve_next(llm: LLMClient):
     """Factory that returns the solve_next node function with the LLM client bound."""
-    client = ollama.Client(host=base_url)
 
     def solve_next(state: GraphState) -> dict:
         dag: list[ThoughtNode] = list(state["thought_dag"])
@@ -171,14 +167,18 @@ def make_solve_next(model_name: str, base_url: str):
                     "retries": retries + 1,
                 }
             sink = _find_sink(dag)
-            return {"thought_dag": dag, "answer": sink["answer"]}
+            raw = sink.get("answer") or ""
+            return {
+                "thought_dag": dag,
+                "answer": _extract_final_answer(raw) or raw,
+            }
 
         failures_this_batch: list[FailureRecord] = []
 
         with ThreadPoolExecutor(max_workers=max(len(ready), 1)) as pool:
             future_to_node = {
                 pool.submit(
-                    _solve_single_node, client, model_name, n, dag, original_prompt
+                    _solve_single_node, llm, n, dag, original_prompt
                 ): n
                 for n in ready
             }
@@ -208,7 +208,11 @@ def make_solve_next(model_name: str, base_url: str):
         unsolved = [n for n in dag if n["answer"] is None]
         if not unsolved:
             sink = _find_sink(dag)
-            return {"thought_dag": dag, "answer": sink["answer"]}
+            raw = sink.get("answer") or ""
+            return {
+                "thought_dag": dag,
+                "answer": _extract_final_answer(raw) or raw,
+            }
 
         return {"thought_dag": dag, "failure_log": failure_log}
 
