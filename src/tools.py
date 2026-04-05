@@ -334,6 +334,40 @@ def linear_factor(tool_input: str) -> str:
     return _fmt_number(avg)
 
 
+def linear_fit(tool_input: str) -> str:
+    """Least-squares linear regression on (x, y) pairs.
+
+    Returns JSON {"slope": a, "intercept": b} for best-fit y = a*x + b.
+    Works for both multiplicative (b≈0) and affine (F→C-style) conversions.
+
+    Accepts either:
+      {"pairs": [[x1,y1], ...]}
+    or the full extract_pairs JSON:
+      {"pairs": [[x1,y1], ...], "target": ...}
+    """
+    data = json.loads(tool_input)
+    pairs = _to_float_pairs(data["pairs"])
+    n = len(pairs)
+    if n < 1:
+        raise ValueError("Need at least one pair for linear_fit")
+    if n == 1:
+        x0, y0 = pairs[0]
+        if x0 == 0:
+            return json.dumps({"slope": 0.0, "intercept": y0})
+        return json.dumps({"slope": y0 / x0, "intercept": 0.0})
+
+    sx = sum(x for x, _ in pairs)
+    sy = sum(y for _, y in pairs)
+    sxy = sum(x * y for x, y in pairs)
+    sx2 = sum(x * x for x, _ in pairs)
+    denom = n * sx2 - sx * sx
+    if abs(denom) < 1e-15:
+        raise ValueError("Degenerate data: all x-values are identical")
+    a = (n * sxy - sx * sy) / denom
+    b = (sy - a * sx) / n
+    return json.dumps({"slope": a, "intercept": b})
+
+
 def compute_gravity_g(tool_input: str) -> str:
     """Compute g from (t, d) observation pairs using g = 2d/t^2. Returns average g.
     Input: {"observations": [[1.37, 14.92], [4.27, 144.96], [3.28, 85.54]]}
@@ -1130,6 +1164,7 @@ TOOL_REGISTRY: dict[str, callable] = {
     "from_roman": from_roman,
     # Unit conversion / gravity
     "linear_factor": linear_factor,
+    "linear_fit": linear_fit,
     "compute_gravity_g": compute_gravity_g,
     "compute_gravity_d": compute_gravity_d,
     "divide_sum_n_json": divide_sum_n_json,
@@ -1213,6 +1248,11 @@ NUMERAL CONVERSION (Roman numerals -- all puzzles in the dataset use Roman):
 UNIT CONVERSION / GRAVITY PHYSICS:
 - linear_factor: Compute average conversion factor from (input, output) pairs.
   Input: {"pairs": [[10.08, 6.69], [17.83, 11.83]]}
+
+- linear_fit: Least-squares linear regression on (x, y) pairs.
+  Returns JSON {"slope": a, "intercept": b} for best-fit y = a*x + b.
+  Works for both multiplicative (b≈0) and affine (F→C-style) conversions.
+  Input: {"pairs": [[35.31, 32.49], [11.58, 10.65], ...]}
 
 - compute_gravity_g: Compute g from (t, d) observations using g = 2d/t².
   Input: {"observations": [[1.37, 14.92], [4.27, 144.96]]}

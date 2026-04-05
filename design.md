@@ -12,7 +12,7 @@ and retry on failure.
 START
   │
   ▼
-classify   (keyword match + build recommended DAG with tools -- no LLM, instant)
+classify   (keyword match + build recommended DAG; gravity uses LLM QueryPlanner)
   │          outputs: puzzle_type, thought_dag (sub-questions + tool assignments)
   ▼
 decompose  (first pass: forwards classifier's DAG unchanged)
@@ -51,7 +51,7 @@ each in the training set).
 | `bit_manipulation`   | "bit manipulation"                            | Deduce bitwise op from examples, apply to new |
 | `cipher_decryption`  | "encryption rules"                            | Build substitution map, decrypt target text   |
 | `equation_transform` | "transformation rules"                        | Build symbol map, transform target equation   |
-| `gravity_physics`    | "gravitational constant"                      | Expand t*t; g chains; LLM emits d_i * / lines; Python tool geometric mean (2dp) |
+| `gravity_physics`    | "gravitational constant"                      | LLM planner builds per-pair mermaid DAG; tool expands into parallel chains; geometric mean (2dp) |
 | `numeral_conversion` | "numeral system"                              | Identify base from examples, convert target   |
 | `unit_conversion`    | "unit conversion"                             | Compute linear factor from examples, convert  |
 
@@ -88,8 +88,8 @@ Deterministic solvers are kept as fallbacks on retry.
 
 | Type                 | DAG Nodes (all LLM)                                                |
 |----------------------|--------------------------------------------------------------------|
-| `gravity_physics`    | extract → fill → **expand** → **g = d/0.5/t/t** → symbolic d_i → **LLM: d_k chain lines only** → **tool** `gravity_geom_mean_chain_exprs` (geometric mean ∏d_i^{1/n}, 2dp) |
-| `unit_conversion`    | extract [from,to] pairs + target → avg factor to/from → apply × target |
+| `gravity_physics`    | LLM planner → per-pair parallel chains: fill_eq_N → expand_N → g_N → d_symbolic_N → d_repr_N → **tool** `gravity_geom_mean_chain_exprs` (geometric mean, 2dp) |
+| `unit_conversion`    | LLM planner → extract_pairs (ask_llm) → **tool** `linear_fit` (least-squares y=ax+b) → **tool** `eval_math` round(a×target+b, 2) |
 | `numeral_conversion` | extract examples JSON + target decimal → infer system → express target |
 | `cipher_decryption`  | extract word pairs ∥ extract ciphertext → decrypt (substitution)   |
 | `bit_manipulation`   | infer rule from all I/O pairs → apply rule to target 8-bit input   |
@@ -102,6 +102,83 @@ and it fails, `solver` still uses an LLM majority-vote fallback for that node.
 > **Migration in progress:** All six puzzle types use LLM-per-step DAGs in
 > `classify`. End-to-end solvers in `tools.py` support retries, optional tool
 > nodes from `decompose`, and targeted fallbacks in `solver`.
+
+### LLM Query Planner (gravity & unit conversion)
+
+For `gravity_physics` and `unit_conversion`, the DAG is built by the
+**LLM Query Planner** (`src/planner.py`).  The planner runs at classify
+time (before DAG execution):
+
+1. **LLM call** — the puzzle prompt is sent to the LLM with a system
+   prompt that instructs it to produce two sections:
+
+   **MERMAID** — a directed-graph topology using N-numbered nodes:
+   ```
+   START --> N1
+   N1 --> N2
+   N1 --> N3
+   N2 --> N4
+   ...
+   Nk --> END
+   ```
+
+   **NODES** — a JSON dict mapping each N-key to a ThoughtNode
+   (minus `depends_on`, which is derived from the mermaid edges):
+   ```json
+   {
+     "N1": {"id": "extract_spec", "question": "Extract pairs, formula, query_t as JSON.", "tool": "ask_llm", "tool_input": null},
+     "N2": {"id": "fill_eq_1", "question": "Formula: d = 0.5*g*t^2. Pair 1: t=3.88, d=109.74. Substitute.", "tool": "ask_llm", "tool_input": null},
+     ...
+     "Nk": {"id": "eval_geom_mean_d", "question": "Geometric mean of d_k values, rounded to 2dp.", "tool": "gravity_geom_mean_chain_exprs", "tool_input": "{d_repr_1}\n{d_repr_2}"}
+   }
+   ```
+
+2. **Parse** — extract edges from the mermaid section and the JSON dict
+   from the nodes section.
+
+3. **Build DAG** — combine topology (`depends_on` from edges) with each
+   ThoughtNode's `id`, `question`, `tool`, and `tool_input`.  If the LLM
+   omits the `question` field, the builder falls back to deterministic
+   templates keyed on the node-id prefix.
+
+Each observation pair `i` gets an independent 5-node chain:
+
+```
+fill_eq_i  →  expand_i  →  g_i  →  d_symbolic_i  →  d_repr_i
+```
+
+All `d_repr_i` feed into a final `eval_geom_mean_d` (tool node).  Because
+pairs are independent, all `fill_eq_*` run in parallel, then all `expand_*`,
+etc., giving N-wide parallelism per batch (N = number of pairs).
+
+#### Unit conversion — affine linear regression
+
+For `unit_conversion`, the DAG is always exactly **3 nodes**.  Instead
+of per-pair multiplicative factors, we use **least-squares linear
+regression** (`y = ax + b`) which handles both multiplicative (b≈0) and
+affine conversions (e.g. Fahrenheit→Celsius where b≠0):
+
+```
+extract_pairs (ask_llm)
+    ↓
+linear_fit (tool: linear_fit) → {"slope": a, "intercept": b}
+    ↓
+apply_convert (tool: eval_math): round(a * target + b, 2)
+```
+
+The solver's `_interpolate_parents` supports JSON sub-field access:
+`{linear_fit_slope}` and `{linear_fit_intercept}` expand to the
+respective values from the `linear_fit` answer.
+
+**Robustness:** the DAG structure is fully deterministic — the builder
+always emits these 3 nodes regardless of what the LLM planner returns.
+The pairs and target are extracted directly from the prompt via regex as
+a cross-check.
+
+- **JSON repair:** truncated JSON (unbalanced braces / brackets) is
+  auto-repaired before parsing.
+- **No silent fallback:** if the LLM planner fails to produce parseable
+  output even after repair, `QueryPlanner.plan_unit` raises an error.
 
 ### LLM-Generated DAGs (for retries and unknown types)
 
@@ -245,7 +322,8 @@ Nemotron/
     ├── config.py            # Env vars: MODEL_NAME, OLLAMA_BASE_URL, LLM_PROVIDER, etc.
     ├── llm_client.py        # Unified LLM client (Ollama local / DeepSeek API fallback)
     ├── state.py             # ThoughtNode, FailureRecord, GraphState
-    ├── classify.py          # Keyword classifier + DAG plan builder (no LLM)
+    ├── classify.py          # Keyword classifier + DAG plan builder (gravity uses LLM planner)
+    ├── planner.py           # LLM QueryPlanner: mermaid topology + node dict → ThoughtNodes
     ├── decompose.py         # Pass-through on first pass; LLM re-decompose on retries
     ├── tools.py             # Deterministic tool functions (binary ops, math, substitution)
     ├── solver.py            # Threaded DAG solver; LLM nodes store full reply, sink answer = last line
@@ -286,9 +364,11 @@ Nemotron/
 All LLM calls go through the unified `LLMClient` (`src/llm_client.py`),
 which dispatches to the selected backend.
 
-- In **classify**, all six puzzle types use LLM-per-step DAGs; deterministic
-  solvers in `tools.py` are used when `decompose` emits them or for targeted
-  fallbacks (e.g. failed `solve_equation_transform` node).
+- In **classify**, gravity and unit conversion use the LLM-based
+  `QueryPlanner` to build per-pair DAGs; other types use deterministic DAG
+  templates.  Deterministic solvers in `tools.py` are used when `decompose`
+  emits them or for targeted fallbacks (e.g. failed `solve_equation_transform`
+  node).
 
 ## Setup
 

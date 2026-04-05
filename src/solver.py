@@ -15,10 +15,25 @@ SYSTEM_PROMPT = (
 
 
 def _interpolate_parents(template: str, dag: list[ThoughtNode]) -> str:
-    """Replace {parent_id} placeholders with parent answers."""
+    """Replace {parent_id} placeholders with parent answers.
+
+    Also supports JSON sub-field access: {node_id_field} will extract
+    ``answer[field]`` when the answer is a JSON object.  For example,
+    {linear_fit_slope} extracts the "slope" key from linear_fit's answer.
+    """
     answered = {n["id"]: (n["answer"] or "") for n in dag if n["answer"] is not None}
     for node_id, answer in answered.items():
         template = template.replace("{" + node_id + "}", answer)
+        # Sub-field expansion: try to parse answer as JSON and expose fields
+        try:
+            obj = json.loads(answer)
+            if isinstance(obj, dict):
+                for key, val in obj.items():
+                    placeholder = "{" + node_id + "_" + key + "}"
+                    if placeholder in template:
+                        template = template.replace(placeholder, str(val))
+        except (json.JSONDecodeError, TypeError):
+            pass
     return template
 
 

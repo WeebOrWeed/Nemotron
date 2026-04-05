@@ -1,5 +1,9 @@
-"""Deterministic classifier that identifies the puzzle type AND produces a
-recommended execution plan (sub-questions + tool assignments).
+"""Classifier that identifies the puzzle type AND produces an execution plan.
+
+For ``gravity_physics`` and ``unit_conversion`` the plan is produced by the
+LLM-based ``QueryPlanner`` (see ``src/planner.py``), which outputs a
+mermaid-style topology + node-metadata dict and builds per-pair ThoughtNodes.
+Other types use deterministic DAG templates.
 
 The classify node outputs both ``puzzle_type`` and ``thought_dag`` so the
 decompose step can use the plan directly -- the LLM only kicks in on retries.
@@ -7,6 +11,8 @@ decompose step can use the plan directly -- the LLM only kicks in on retries.
 from __future__ import annotations
 
 from src.state import GraphState, ThoughtNode
+from src.llm_client import LLMClient
+from src.planner import QueryPlanner
 
 # ── keyword → puzzle type mapping ──────────────────────────────────────
 
@@ -23,191 +29,6 @@ PUZZLE_SIGNATURES: dict[str, str] = {
 # Each builder receives the raw prompt and returns a list[ThoughtNode].
 # The ``tool`` field tells the solver which deterministic tool (or LLM
 # fallback) to use for that step.
-
-def _plan_gravity(prompt: str) -> list[ThoughtNode]:
-    return [
-        ThoughtNode(
-            id="extract_spec",
-            question=(
-                "Read the gravitational / falling-body puzzle below.\n\n"
-                f"{prompt}\n\n"
-                "Extract and output ONLY valid JSON, nothing else:\n"
-                "- \"pairs\": list of [t, d] observation pairs (time and distance, "
-                "numbers only, consistent units).\n"
-                "- \"gravitation_function\": the governing relation as a string. "
-                "In almost all cases use \"d = 0.5*g*t^2\" (or equivalent "
-                "d = (1/2)*g*t^2). If the prompt states a different law, use that "
-                "exact form.\n"
-                "- \"query_t\": the time t for which you must find the distance d.\n"
-                'Example shape: {"pairs": [[3.88, 109.74], ...], '
-                '"gravitation_function": "d = 0.5*g*t^2", "query_t": 4.41}'
-            ),
-            depends_on=[],
-            tool="ask_llm",
-            tool_input=None,
-            answer=None,
-        ),
-        ThoughtNode(
-            id="fill_equations",
-            question=(
-                "Structured spec (JSON):\n{extract_spec}\n\n"
-                "Using the gravitation_function, substitute each observation pair "
-                "(t, d) into the formula so d and t are numeric and g is still "
-                "unknown. One equation per line.\n"
-                "Use one line per observation, e.g. 14.92 = 0.5*g*1.37^2 or "
-                "already-expanded 14.92 = 0.5*g*1.37*1.37 if you prefer.\n"
-                "Show every observation as its own filled equation."
-            ),
-            depends_on=["extract_spec"],
-            tool="ask_llm",
-            tool_input=None,
-            answer=None,
-        ),
-        ThoughtNode(
-            id="expand_products",
-            question=(
-                "Filled equations:\n{fill_equations}\n\n"
-                "This step is **expand only**—do **not** multiply numeric factors "
-                "together (do **not** compute t*t, do **not** fold 0.5 with "
-                "anything). Preserve full precision by leaving every factor "
-                "separate.\n"
-                "**Required:** replace each t^2 with two copies of t joined by "
-                "* only: t^2 -> t*t using the numeric t for that line.\n"
-                "**No parentheses.** Output must look exactly like:\n"
-                "14.92 = 0.5*g*1.37*1.37\n"
-                "one line per observation, same pattern, nothing else—no extra "
-                "blocks, no evaluated products, no combining 0.5 with t terms."
-            ),
-            depends_on=["fill_equations"],
-            tool="ask_llm",
-            tool_input=None,
-            answer=None,
-        ),
-        ThoughtNode(
-            id="g_unevaluated",
-            question=(
-                "Expanded equations (must stay unevaluated):\n{expand_products}\n\n"
-                "For **each** line d = 0.5*g*t*t, isolate g by dividing both "
-                "sides, writing g as a **chain of divisions** with **each factor "
-                "separate**—same style as:\n"
-                "g = 14.92 / 0.5 / 1.37 / 1.37\n"
-                "Use the actual d, 0.5, and the two t values from that line. "
-                "**No parentheses.** **Do not** multiply or divide numerically; "
-                "leave every slash as literal structure only. One g=... line per "
-                "observation."
-            ),
-            depends_on=["expand_products"],
-            tool="ask_llm",
-            tool_input=None,
-            answer=None,
-        ),
-        ThoughtNode(
-            id="d_per_pair_symbolic",
-            question=(
-                "Spec (JSON):\n{extract_spec}\n\n"
-                "Unevaluated g expressions (one per observation):\n"
-                "{g_unevaluated}\n\n"
-                "For **each** observation, derive the distance at **query_t** "
-                "from the gravitation_function by substituting that row's g "
-                "expression—keep the result as **one symbolic formula** d_i "
-                "(only multiplications/divisions/powers, still **no** decimal "
-                "evaluation). When the law is d = 0.5*g*t^2, prefer the fully "
-                "expanded chain form with **no** parentheses and **no** "
-                "partial products, e.g. "
-                "d_i = d_obs * query_t * query_t / t_obs / t_obs (use numeric "
-                "query_t and t_obs from the JSON and each g-line).\n"
-                "Label d_1, d_2, ... matching each pair. **Do not** compute "
-                "numeric d_i yet."
-            ),
-            depends_on=["g_unevaluated", "extract_spec"],
-            tool="ask_llm",
-            tool_input=None,
-            answer=None,
-        ),
-        ThoughtNode(
-            id="d_i_representations",
-            question=(
-                "Symbolic per-pair distances (unevaluated):\n{d_per_pair_symbolic}\n\n"
-                "Re-output **only** the same ``d_i`` lines as above—**same count** "
-                "as in that block (often five, but puzzles may have fewer "
-                "observations). **Do not** add ``d_{n+1}`` or any extra line; "
-                "**do not** drop a line.\n"
-                "Each line: ``d_k = <decimals with only * and />`` — **no** "
-                "parentheses, **no** powers, **no** letters (especially **no** "
-                "``g`` on the right-hand side), **no** JSON.\n"
-                "**Do not** compute numeric values. No blank lines, markdown, or "
-                "commentary."
-            ),
-            depends_on=["d_per_pair_symbolic"],
-            tool="ask_llm",
-            tool_input=None,
-            answer=None,
-        ),
-        ThoughtNode(
-            id="eval_geom_mean_d",
-            question=(
-                "Python: parse d_k lines, multiply the evaluated d values together, "
-                "then take the n-th root (geometric mean, n = line count). "
-                "Return that value rounded to 2dp."
-            ),
-            depends_on=["d_i_representations"],
-            tool="gravity_geom_mean_chain_exprs",
-            tool_input="{d_i_representations}",
-            answer=None,
-        ),
-    ]
-
-
-def _plan_unit(prompt: str) -> list[ThoughtNode]:
-    return [
-        ThoughtNode(
-            id="extract_pairs",
-            question=(
-                "Read the unit conversion puzzle below. Extract ALL example "
-                "conversions as [from_value, to_value] pairs (numbers only), "
-                "and the target value the puzzle asks you to convert.\n\n"
-                f"{prompt}\n\n"
-                "Output ONLY valid JSON in this exact format, nothing else:\n"
-                '{"pairs": [[from1, to1], [from2, to2], ...], "target": <number>}'
-            ),
-            depends_on=[],
-            tool="ask_llm",
-            tool_input=None,
-            answer=None,
-        ),
-        ThoughtNode(
-            id="compute_factor",
-            question=(
-                "Given these unit-conversion example pairs (linear scale in the "
-                "same unit system):\n"
-                "{extract_pairs}\n\n"
-                "For each pair [from, to], compute factor = to / from.\n"
-                "Then compute the average factor across all pairs.\n"
-                "Show your work briefly, then output ONLY the average factor as a "
-                "number on the last line."
-            ),
-            depends_on=["extract_pairs"],
-            tool="ask_llm",
-            tool_input=None,
-            answer=None,
-        ),
-        ThoughtNode(
-            id="apply_convert",
-            question=(
-                "The linear conversion factor is: {compute_factor}\n"
-                "Full context (JSON with pairs and target): {extract_pairs}\n\n"
-                "Compute converted = factor * target using the \"target\" field "
-                "from the JSON. Match the precision of the examples (typically "
-                "two decimal places).\n"
-                "Output ONLY the final number on the last line."
-            ),
-            depends_on=["compute_factor", "extract_pairs"],
-            tool="ask_llm",
-            tool_input=None,
-            answer=None,
-        ),
-    ]
-
 
 def _plan_numeral(prompt: str) -> list[ThoughtNode]:
     return [
@@ -406,34 +227,43 @@ def _plan_equation(prompt: str) -> list[ThoughtNode]:
     ]
 
 
-_PLAN_BUILDERS: dict[str, callable] = {
-    "gravity_physics": _plan_gravity,
-    "unit_conversion": _plan_unit,
-    "numeral_conversion": _plan_numeral,
-    "cipher_decryption": _plan_cipher,
-    "bit_manipulation": _plan_bit,
-    "equation_transform": _plan_equation,
-}
+def make_classify_node(llm: LLMClient):
+    """Factory that returns the classify node function with the LLM client bound.
 
-
-def classify_node(state: GraphState) -> dict:
-    """Classify the puzzle and emit a recommended execution plan.
-
-    Returns ``puzzle_type`` and ``thought_dag``.  For known types the DAG
-    is an LLM-per-step chain (or mixed with tools after retries from
-    ``decompose``).  For unknown types the DAG is left empty so
-    decompose will generate one via the LLM.
+    Gravity and unit conversion use the LLM-based ``QueryPlanner``; other
+    types use deterministic DAG templates.
     """
-    prompt = state["prompt"]
-    prompt_lower = prompt.lower()
+    planner = QueryPlanner(llm)
 
-    puzzle_type = "unknown"
-    for signature, ptype in PUZZLE_SIGNATURES.items():
-        if signature in prompt_lower:
-            puzzle_type = ptype
-            break
+    plan_builders: dict[str, callable] = {
+        "gravity_physics": planner.plan_gravity,
+        "unit_conversion": planner.plan_unit,
+        "numeral_conversion": _plan_numeral,
+        "cipher_decryption": _plan_cipher,
+        "bit_manipulation": _plan_bit,
+        "equation_transform": _plan_equation,
+    }
 
-    builder = _PLAN_BUILDERS.get(puzzle_type)
-    dag = builder(prompt) if builder else None
+    def classify_node(state: GraphState) -> dict:
+        """Classify the puzzle and emit a recommended execution plan.
 
-    return {"puzzle_type": puzzle_type, "thought_dag": dag}
+        Returns ``puzzle_type`` and ``thought_dag``.  For known types the
+        DAG is built by a plan builder (LLM-based for gravity, deterministic
+        for others).  For unknown types the DAG is left empty so decompose
+        will generate one via the LLM.
+        """
+        prompt = state["prompt"]
+        prompt_lower = prompt.lower()
+
+        puzzle_type = "unknown"
+        for signature, ptype in PUZZLE_SIGNATURES.items():
+            if signature in prompt_lower:
+                puzzle_type = ptype
+                break
+
+        builder = plan_builders.get(puzzle_type)
+        dag = builder(prompt) if builder else None
+
+        return {"puzzle_type": puzzle_type, "thought_dag": dag}
+
+    return classify_node

@@ -32,7 +32,7 @@ def _print_dag_trace(output: dict) -> None:
     print(f"    type={puzzle_type}  nodes={len(dag)}  retries={retries}")
     for node in dag:
         status = "OK" if node["answer"] is not None else "UNSOLVED"
-        answer_preview = (node["answer"] or "")[:60]
+        answer_preview = (node["answer"] or "")[:60].encode("ascii", "replace").decode()
         deps = ",".join(node["depends_on"]) if node["depends_on"] else "(root)"
         executor = f"tool:{node['tool']}" if node.get("tool") else "llm"
         print(f"    [{status}] {node['id']} ({executor}) deps={deps} -> {answer_preview}")

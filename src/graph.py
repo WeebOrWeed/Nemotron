@@ -1,7 +1,7 @@
 from langgraph.graph import StateGraph, START, END
 
 from src.state import GraphState
-from src.classify import classify_node
+from src.classify import make_classify_node
 from src.decompose import make_decompose_node
 from src.solver import make_solve_next
 from src.config import MAX_RETRIES
@@ -27,6 +27,7 @@ def _route_after_solve(state: GraphState) -> str:
 
 
 def build_graph(llm: LLMClient):
+    classify_node = make_classify_node(llm)
     decompose_node = make_decompose_node(llm)
     solve_next = make_solve_next(llm)
 
