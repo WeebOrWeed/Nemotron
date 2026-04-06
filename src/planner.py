@@ -1,4 +1,4 @@
-"""LLM-based query planner for gravity and unit conversion (extensible).
+"""LLM-based query planner for gravity, unit, numeral, and cipher puzzles.
 
 The planner calls the LLM to produce a structured execution plan with two parts:
   1. A mermaid-style directed graph (N1 --> N2, etc.) defining the topology
@@ -541,10 +541,296 @@ def _build_unit_dag(
     return dag
 
 
+# ═══════════════════════════════════════════════════════════════════
+#  NUMERAL CONVERSION planner  (generalized: Roman, base-N, custom)
+# ═══════════════════════════════════════════════════════════════════
+
+NUMERAL_PLANNER_SYSTEM = """\
+You are a DAG planner for numeral-system conversion puzzles.
+
+The puzzle gives examples of numbers converted into an unknown numeral
+system (could be Roman, binary, hex, or any base 2-36) and asks you to
+convert a target number.
+
+Plan a DAG with EXACTLY these 5 nodes:
+
+1. extract_data    (tool: ask_llm)  — extract [decimal, notation] pairs,
+   target number, and list unique symbols seen in the notations.
+2. detect_system   (tool: detect_numeral_system) — deterministic: tries
+   Roman + all bases 2-36 against the examples.  Runs in PARALLEL with N3.
+3. llm_analyze     (tool: ask_llm) — LLM reasons about the patterns.
+   Runs in PARALLEL with N2.
+4. reconcile       (tool: ask_llm) — combines results from N2 and N3,
+   picks the system.  If detect_system found a perfect match, trust it.
+   Output ONE line: SYSTEM=roman  or  SYSTEM=base_N  (e.g. SYSTEM=base_16).
+5. convert_target  (tool: convert_numeral) — deterministic conversion.
+
+Output EXACTLY two sections (no other text):
+
+MERMAID:
+START --> N1
+N1 --> N2
+N1 --> N3
+N2 --> N4
+N3 --> N4
+N4 --> N5
+N5 --> END
+
+NODES:
+{"N1": {...}, "N2": {...}, "N3": {...}, "N4": {...}, "N5": {...}}
+
+- ALWAYS output exactly 5 nodes with this topology.
+- Use the actual target number from the puzzle.\
+"""
+
+
+def _extract_target_number(prompt: str) -> int | None:
+    """Extract the target decimal number from a numeral conversion prompt."""
+    m = re.search(r"write the number\s+(\d+)", prompt, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"convert.*?(\d+)", prompt, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _extract_numeral_pairs(prompt: str) -> list[list]:
+    """Extract (decimal, notation) example pairs from the prompt."""
+    pairs = []
+    for m in re.finditer(r"(\d+)\s*->\s*(\S+)", prompt):
+        pairs.append([int(m.group(1)), m.group(2)])
+    return pairs
+
+
+def _build_numeral_dag(
+    edges: list[tuple[str, str]],
+    nodes_dict: dict[str, dict],
+    prompt: str,
+) -> list[ThoughtNode]:
+    """Build a 5-node numeral conversion DAG with parallel hypothesis testing.
+
+    Structure:
+      extract_data → (detect_system ∥ llm_analyze) → reconcile → convert_target
+
+    detect_system deterministically tries Roman + bases 2-36.
+    llm_analyze lets the LLM reason about patterns/custom systems.
+    reconcile picks the best system.  convert_target applies it.
+    """
+    target = _extract_target_number(prompt)
+    if target is None:
+        raise ValueError(
+            "Could not extract target number from numeral conversion prompt"
+        )
+
+    pairs = _extract_numeral_pairs(prompt)
+    pairs_json = json.dumps(pairs)
+
+    dag: list[ThoughtNode] = [
+        # N1: extract data
+        ThoughtNode(
+            id="extract_data",
+            question=(
+                "Read the numeral-system puzzle below. Extract:\n"
+                "1. Every example as [decimal_number, notation_string]\n"
+                "2. The target decimal number to convert\n"
+                "3. All unique symbols you see in the notation outputs\n\n"
+                f"{prompt}\n\n"
+                "Output ONLY valid JSON:\n"
+                '{"pairs": [[38, "XXXVIII"], ...], "target": 38, '
+                '"symbols": ["I","V","X","L","C","D","M"]}'
+            ),
+            depends_on=[],
+            tool="ask_llm",
+            tool_input=None,
+            answer=None,
+        ),
+        # N2: deterministic detection (parallel with N3)
+        ThoughtNode(
+            id="detect_system",
+            question=(
+                "Detect the numeral system by testing all known systems "
+                "(Roman, base 2-36) against the example pairs."
+            ),
+            depends_on=["extract_data"],
+            tool="detect_numeral_system",
+            tool_input=json.dumps({"pairs": pairs}),
+            answer=None,
+        ),
+        # N3: LLM analysis (parallel with N2)
+        ThoughtNode(
+            id="llm_analyze",
+            question=(
+                "Analyze these numeral conversion examples:\n"
+                f"{pairs_json}\n\n"
+                "For each example, study the notation output:\n"
+                "- What unique symbols appear? How many?\n"
+                "- Is it positional (like binary/hex) or additive/subtractive "
+                "(like Roman)?\n"
+                "- If positional: what base? The number of unique symbols "
+                "often equals the base.\n"
+                "- If Roman-like: I=1, V=5, X=10, L=50, C=100, D=500, M=1000?\n"
+                "- Could it be a custom system with non-standard symbols?\n\n"
+                "Conclude with ONE line:\n"
+                "SYSTEM=roman  OR  SYSTEM=base_N  (e.g. SYSTEM=base_16)\n"
+                "If unsure, give your best guess."
+            ),
+            depends_on=["extract_data"],
+            tool="ask_llm",
+            tool_input=None,
+            answer=None,
+        ),
+        # N4: reconcile
+        ThoughtNode(
+            id="reconcile",
+            question=(
+                "Deterministic detection result:\n{detect_system}\n\n"
+                "LLM analysis:\n{llm_analyze}\n\n"
+                "Pick the numeral system. Rules:\n"
+                "- If detect_system shows all_correct=true, TRUST it.\n"
+                "- If detect_system failed (all_correct=false), consider "
+                "the LLM analysis.\n"
+                "- If both disagree and neither is confident, go with "
+                "detect_system's best match.\n\n"
+                "Output ONLY one line: SYSTEM=roman  or  SYSTEM=base_N"
+            ),
+            depends_on=["detect_system", "llm_analyze"],
+            tool="ask_llm",
+            tool_input=None,
+            answer=None,
+        ),
+        # N5: convert target
+        ThoughtNode(
+            id="convert_target",
+            question=f"Convert {target} using the reconciled system.",
+            depends_on=["reconcile"],
+            tool="convert_numeral",
+            tool_input=json.dumps({
+                "number": target,
+                "system": "{reconcile}",
+            }),
+            answer=None,
+        ),
+    ]
+
+    return dag
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  CIPHER DECRYPTION planner
+# ═══════════════════════════════════════════════════════════════════
+
+CIPHER_PLANNER_SYSTEM = """\
+You are a DAG planner for cipher / encryption puzzles.
+
+The puzzle gives N example lines (encrypted text -> plaintext) and asks
+you to decrypt a target ciphertext.  The encryption rule is UNKNOWN.
+
+Plan a DAG with this topology:
+
+1. extract_cases (ask_llm) — discover all routes (example lines + target).
+2. For EACH case i (parallel, deterministic):
+   a. extract_pairs_i (split_word_pairs) — split into word pairs.
+   b. create_mapping_i (build_char_map) — char alignment.
+3. merge_mapping (merge_char_maps) — majority-vote merge.
+4. translate (decrypt_substitution) — apply map to ciphertext.
+
+Only extract_cases uses the LLM.  Everything else is deterministic.\
+"""
+
+
+def _extract_cipher_cases(prompt: str) -> list[tuple[str, str]]:
+    """Extract (encrypted_line, plain_line) example pairs from the prompt."""
+    return [
+        (enc.strip(), plain.strip())
+        for enc, plain in re.findall(r"(.+?)\s*->\s*(.+)", prompt)
+    ]
+
+
+def _extract_ciphertext(prompt: str) -> str:
+    """Extract the target ciphertext from the prompt."""
+    m = re.search(r"decrypt the following text:\s*(.+)", prompt, re.IGNORECASE)
+    return m.group(1).strip() if m else ""
+
+
+def _build_cipher_dag(
+    edges: list[tuple[str, str]],
+    nodes_dict: dict[str, dict],
+    prompt: str,
+) -> list[ThoughtNode]:
+    """Build a cipher DAG: one LLM call to discover routes, then fully deterministic.
+
+    Structure:
+      extract_cases (ask_llm)
+        ├── extract_pairs_1 (split_word_pairs)  → create_mapping_1 (build_char_map) ─┐
+        ├── extract_pairs_2 (split_word_pairs)  → create_mapping_2 (build_char_map) ─┤
+        ├── ...                                                                      ─┤
+        └── extract_pairs_N (split_word_pairs)  → create_mapping_N (build_char_map) ─┘
+                                                                                      ↓
+                                                        merge_mapping (merge_char_maps)
+                                                                                      ↓
+                                                    translate (decrypt_substitution)
+
+    Only extract_cases uses the LLM.  Everything after is deterministic.
+    """
+    cases = _extract_cipher_cases(prompt)
+    ciphertext = _extract_ciphertext(prompt)
+
+    dag: list[ThoughtNode] = []
+
+    mapping_ids: list[str] = []
+    for i, (enc_line, plain_line) in enumerate(cases, 1):
+        pairs_id = f"extract_pairs_{i}"
+        map_id = f"create_mapping_{i}"
+        mapping_ids.append(map_id)
+
+        enc_esc = enc_line.replace('"', '\\"')
+        plain_esc = plain_line.replace('"', '\\"')
+        dag.append(ThoughtNode(
+            id=pairs_id,
+            question=f"Split words: {enc_line} | {plain_line}",
+            depends_on=[],
+            tool="split_word_pairs",
+            tool_input=f'{{"encrypted": "{enc_esc}", "plaintext": "{plain_esc}"}}',
+            answer=None,
+        ))
+
+        dag.append(ThoughtNode(
+            id=map_id,
+            question="Build character substitution map from word pairs.",
+            depends_on=[pairs_id],
+            tool="build_char_map",
+            tool_input="{" + pairs_id + "}",
+            answer=None,
+        ))
+
+    maps_input = "\n".join("{" + mid + "}" for mid in mapping_ids)
+    dag.append(ThoughtNode(
+        id="merge_mapping",
+        question="Merge all per-case character mappings via majority vote.",
+        depends_on=list(mapping_ids),
+        tool="merge_char_maps",
+        tool_input=maps_input,
+        answer=None,
+    ))
+
+    ct_esc = ciphertext.replace('"', '\\"')
+    dag.append(ThoughtNode(
+        id="translate",
+        question="Apply merged char map to ciphertext.",
+        depends_on=["merge_mapping"],
+        tool="decrypt_substitution",
+        tool_input='{"ciphertext": "' + ct_esc + '", "mapping": {merge_mapping}}',
+        answer=None,
+    ))
+
+    return dag
+
+
 # ── QueryPlanner class ──────────────────────────────────────────────
 
 class QueryPlanner:
-    """LLM-based query planner for gravity and unit conversion puzzles.
+    """LLM-based query planner for gravity, unit, numeral, and cipher puzzles.
 
     Calls the LLM to generate a mermaid-style execution plan (topology)
     plus a ThoughtNode dict, then combines them into ThoughtNodes.
@@ -571,6 +857,37 @@ class QueryPlanner:
         Raises if the LLM output cannot be parsed into a valid DAG.
         """
         return self._llm_plan(UNIT_PLANNER_SYSTEM, prompt, _build_unit_dag)
+
+    # ── numeral conversion ────────────────────────────────────────
+
+    def plan_numeral(self, prompt: str) -> list[ThoughtNode]:
+        """Plan a numeral conversion puzzle via LLM planner.
+
+        Falls back to building the DAG directly from the prompt if the
+        planner output can't be parsed — the DAG shape is fixed (5 nodes)
+        so no planner information is actually lost.
+        """
+        try:
+            return self._llm_plan(
+                NUMERAL_PLANNER_SYSTEM, prompt, _build_numeral_dag
+            )
+        except (ValueError, KeyError):
+            return _build_numeral_dag([], {}, prompt)
+
+    # ── cipher decryption ─────────────────────────────────────────
+
+    def plan_cipher(self, prompt: str) -> list[ThoughtNode]:
+        """Plan a cipher decryption puzzle via LLM planner.
+
+        Falls back to building the DAG directly from the prompt if the
+        planner output can't be parsed.
+        """
+        try:
+            return self._llm_plan(
+                CIPHER_PLANNER_SYSTEM, prompt, _build_cipher_dag
+            )
+        except (ValueError, KeyError):
+            return _build_cipher_dag([], {}, prompt)
 
     # ── shared LLM call ───────────────────────────────────────────
 

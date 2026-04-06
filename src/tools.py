@@ -234,6 +234,18 @@ def substitute_chars(tool_input: str) -> str:
     return "".join(mapping.get(ch, ch) for ch in text)
 
 
+def split_word_pairs(tool_input: str) -> str:
+    """Split an encrypted line and plaintext line into word-level pairs.
+    Input: {"encrypted": "ucoov pwgtfyoqg vorq", "plaintext": "queen discovers near"}
+    Returns: {"pairs": [["ucoov","queen"],["pwgtfyoqg","discovers"],["vorq","near"]]}
+    """
+    data = json.loads(tool_input)
+    enc_words = data["encrypted"].strip().split()
+    plain_words = data["plaintext"].strip().split()
+    pairs = list(zip(enc_words, plain_words))
+    return json.dumps({"pairs": pairs}, ensure_ascii=False)
+
+
 def build_char_map(tool_input: str) -> str:
     """Build a character substitution map from aligned text pairs.
     Input: {"pairs": [["ucoov", "queen"], ["pqrsfv", "dragon"]]}
@@ -254,8 +266,46 @@ def build_char_map(tool_input: str) -> str:
     return json.dumps(mapping, ensure_ascii=False)
 
 
+def merge_char_maps(tool_input: str) -> str:
+    """Merge multiple character mapping JSONs via majority vote.
+
+    Input: newline-delimited JSON objects, one per line. Each is a
+    {encrypted_char: plain_char} mapping.  Lines that aren't valid JSON
+    are skipped.  For each key the value appearing most often wins.
+    """
+    from collections import Counter
+
+    votes: dict[str, list[str]] = {}
+    for line in tool_input.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            m = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            start = line.find("{")
+            if start < 0:
+                continue
+            try:
+                m, _ = json.JSONDecoder().raw_decode(line, start)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        if not isinstance(m, dict):
+            continue
+        for k, v in m.items():
+            if isinstance(v, str) and len(v) == 1 and len(k) == 1:
+                votes.setdefault(k, []).append(v)
+
+    merged: dict[str, str] = {}
+    for k, vals in votes.items():
+        winner, _ = Counter(vals).most_common(1)[0]
+        merged[k] = winner
+
+    return json.dumps(merged, ensure_ascii=False)
+
+
 # ===================================================================
-# Numeral conversion tools (dataset is 100% Roman numerals)
+# Numeral conversion tools
 # ===================================================================
 
 _ROMAN_VALUES = [
@@ -304,6 +354,131 @@ def from_roman(tool_input: str) -> str:
             total += val
         prev = val
     return str(total)
+
+
+_BASE_DIGITS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def _int_to_base(number: int, base: int) -> str:
+    """Convert a non-negative integer to a string in the given base (2-36)."""
+    if number == 0:
+        return "0"
+    result = []
+    while number > 0:
+        result.append(_BASE_DIGITS[number % base])
+        number //= base
+    return "".join(reversed(result))
+
+
+def _normalize(s: str) -> str:
+    """Normalize a numeral string for comparison (strip + uppercase)."""
+    return s.strip().upper()
+
+
+def detect_numeral_system(tool_input: str) -> str:
+    """Detect the numeral system from (decimal, notation) example pairs.
+
+    Tries Roman numerals and all positional bases 2-36.  Returns the
+    system that matches the most examples.
+
+    Input:  {"pairs": [[38, "XXXVIII"], [15, "XV"], ...]}
+    Output: JSON {"system": "roman"|"base_N", "base": N|null,
+                   "matches": M, "total": T, "all_correct": bool,
+                   "failures": [...]}
+    """
+    data = json.loads(tool_input)
+    raw_pairs = data.get("pairs")
+    if raw_pairs is None:
+        raise ValueError("detect_numeral_system: 'pairs' key not found in input")
+    if isinstance(raw_pairs, str):
+        raw_pairs = json.loads(raw_pairs)
+    pairs = [(int(float(str(p[0]).strip())), str(p[1]).strip()) for p in raw_pairs]
+    total = len(pairs)
+
+    best = {"system": "unknown", "base": None, "matches": 0,
+            "total": total, "all_correct": False, "failures": []}
+
+    # Try Roman
+    roman_matches = 0
+    roman_failures = []
+    for decimal, notation in pairs:
+        try:
+            expected = to_roman(json.dumps({"number": decimal}))
+            if _normalize(expected) == _normalize(notation):
+                roman_matches += 1
+            else:
+                roman_failures.append(
+                    {"decimal": decimal, "expected": expected,
+                     "got": notation})
+        except Exception:
+            roman_failures.append({"decimal": decimal, "expected": "ERROR",
+                                   "got": notation})
+    if roman_matches > best["matches"]:
+        best = {"system": "roman", "base": 10, "matches": roman_matches,
+                "total": total, "all_correct": roman_matches == total,
+                "failures": roman_failures}
+
+    # Try bases 2-36
+    for base in range(2, 37):
+        matches = 0
+        failures = []
+        for decimal, notation in pairs:
+            expected = _int_to_base(decimal, base)
+            if _normalize(expected) == _normalize(notation):
+                matches += 1
+            else:
+                failures.append({"decimal": decimal,
+                                 "expected": expected, "got": notation})
+        if matches > best["matches"] or (
+            matches == best["matches"] and matches == total
+        ):
+            best = {"system": f"base_{base}", "base": base,
+                    "matches": matches, "total": total,
+                    "all_correct": matches == total,
+                    "failures": failures}
+        if matches == total:
+            break  # perfect match, no need to try more
+
+    return json.dumps(best)
+
+
+def convert_numeral(tool_input: str) -> str:
+    """Convert a decimal integer to the specified numeral system.
+
+    Input:  {"number": 38, "system": "roman"}
+            {"number": 42, "system": "base_2"}  or  {"number": 42, "base": 2}
+            {"number": 255, "system": "base_16"} or {"number": 255, "base": 16}
+    The "system" field also accepts raw LLM text containing SYSTEM=<value>.
+    Output: The numeral string (e.g. "XXXVIII", "101010", "FF")
+    """
+    data = json.loads(tool_input)
+    number = int(float(str(data["number"]).strip()))
+    system = str(data.get("system", "")).strip()
+
+    # Parse SYSTEM=xxx from LLM output (may contain multi-line reasoning)
+    sys_match = re.search(r"SYSTEM\s*=\s*(\S+)", system, re.IGNORECASE)
+    if sys_match:
+        system = sys_match.group(1).strip()
+    system = system.lower()
+
+    base = data.get("base")
+
+    if system == "roman":
+        return to_roman(json.dumps({"number": number}))
+
+    if base is not None:
+        base = int(base)
+    elif system.startswith("base_"):
+        base = int(system.split("_", 1)[1])
+    elif system.startswith("base"):
+        base = int(system.replace("base", "").strip())
+
+    if base is not None and 2 <= base <= 36:
+        return _int_to_base(number, base)
+
+    raise ValueError(
+        f"Unknown numeral system: system={system!r}, base={base!r}"
+    )
 
 
 # ===================================================================
@@ -497,6 +672,50 @@ _CIPHER_VOCAB = {
     "tower", "treasure", "turtle", "under", "valley", "village", "watches",
     "wise", "wizard", "wonderland", "writes",
 }
+
+
+def decrypt_substitution(tool_input: str) -> str:
+    """Decrypt ciphertext using a substitution map, with vocabulary-guided
+    permutation search for any unmapped letters.
+
+    Input: {"ciphertext": "trb wzrswvog hffk",
+            "mapping": {"t":"c","r":"a","b":"t",...}}
+    Or mapping can be a JSON string.
+    """
+    from itertools import permutations as _perms
+
+    data = json.loads(tool_input)
+    target = data["ciphertext"].strip()
+    mapping = data["mapping"]
+    if isinstance(mapping, str):
+        mapping = json.loads(mapping)
+
+    all_letters = set("abcdefghijklmnopqrstuvwxyz")
+    mapped_to = set(mapping.values()) & all_letters
+    unmapped_in_target = sorted(
+        {ch for ch in target if ch in all_letters and ch not in mapping}
+    )
+    unmapped_plain = sorted(all_letters - mapped_to)
+
+    if unmapped_in_target and len(unmapped_plain) >= len(unmapped_in_target):
+        best_result = None
+        best_score = -1
+        for perm in _perms(unmapped_plain, len(unmapped_in_target)):
+            test_map = dict(mapping)
+            for e, p in zip(unmapped_in_target, perm):
+                test_map[e] = p
+            result = "".join(test_map.get(ch, ch) for ch in target)
+            words = result.split()
+            score = sum(1 for w in words if w in _CIPHER_VOCAB)
+            if score > best_score:
+                best_score = score
+                best_result = result
+            if score == len(words):
+                return result
+        if best_result:
+            return best_result
+
+    return "".join(mapping.get(ch, ch) for ch in target)
 
 
 def solve_cipher_decryption(tool_input: str) -> str:
@@ -1157,11 +1376,16 @@ TOOL_REGISTRY: dict[str, callable] = {
     "rotate_left": rotate_left,
     "rotate_right": rotate_right,
     # Cipher / substitution
+    "split_word_pairs": split_word_pairs,
     "substitute_chars": substitute_chars,
     "build_char_map": build_char_map,
+    "merge_char_maps": merge_char_maps,
+    "decrypt_substitution": decrypt_substitution,
     # Numeral conversion
     "to_roman": to_roman,
     "from_roman": from_roman,
+    "detect_numeral_system": detect_numeral_system,
+    "convert_numeral": convert_numeral,
     # Unit conversion / gravity
     "linear_factor": linear_factor,
     "linear_fit": linear_fit,
@@ -1234,6 +1458,10 @@ BIT MANIPULATION (8-bit binary):
 - rotate_right: Circular rotate right. Input: {"a": "10110010", "n": 1, "bits": 8}
 
 CIPHER / SUBSTITUTION:
+- split_word_pairs: Split encrypted and plaintext lines into word-level pairs.
+  Input: {"encrypted": "ucoov pwgtfyoqg vorq", "plaintext": "queen discovers near"}
+  Returns: {"pairs": [["ucoov","queen"],["pwgtfyoqg","discovers"],["vorq","near"]]}
+
 - substitute_chars: Apply a character mapping to text.
   Input: {"text": "ucoov", "mapping": {"u": "q", "c": "u", "o": "e", "v": "n"}}
 
@@ -1241,9 +1469,24 @@ CIPHER / SUBSTITUTION:
   Input: {"pairs": [["ucoov", "queen"], ["pqrsfv", "dragon"]]}
   Returns JSON mapping object.
 
-NUMERAL CONVERSION (Roman numerals -- all puzzles in the dataset use Roman):
+- decrypt_substitution: Decrypt ciphertext using a substitution map.
+  Handles unmapped letters via vocabulary-guided permutation search.
+  Input: {"ciphertext": "trb wzrswvog hffk", "mapping": {"t":"c","r":"a",...}}
+  Returns decrypted plaintext.
+
+NUMERAL CONVERSION:
 - to_roman: Convert integer to Roman numeral.     Input: {"number": 38}  ->  "XXXVIII"
 - from_roman: Convert Roman numeral to integer.    Input: {"roman": "XXXVIII"}  ->  "38"
+
+- detect_numeral_system: Detect the numeral system from (decimal, notation) pairs.
+  Tries Roman and all bases 2-36, returns the best-matching system.
+  Input: {"pairs": [[38, "XXXVIII"], [15, "XV"]]}
+  Output: JSON {"system": "roman"|"base_N", "base": N, "matches": M, "total": T, "all_correct": bool}
+
+- convert_numeral: Convert a decimal integer to any detected system.
+  Input: {"number": 38, "system": "roman"}  ->  "XXXVIII"
+  Input: {"number": 42, "system": "base_2"}  ->  "101010"
+  Input: {"number": 255, "system": "base_16"}  ->  "FF"
 
 UNIT CONVERSION / GRAVITY PHYSICS:
 - linear_factor: Compute average conversion factor from (input, output) pairs.

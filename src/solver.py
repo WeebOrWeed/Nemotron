@@ -74,10 +74,14 @@ def _run_llm_node(
     question = node["question"]
     question = _interpolate_parents(question, dag)
 
-    full_question = (
-        f"Original puzzle:\n{original_prompt}\n\n"
-        f"Your task:\n{question}"
-    )
+    no_context = (node.get("tool_input") == "no_context")
+    if no_context:
+        full_question = question
+    else:
+        full_question = (
+            f"Original puzzle:\n{original_prompt}\n\n"
+            f"Your task:\n{question}"
+        )
 
     n_votes = int(node.get("tool_input") or "1") if node.get("tool") == "majority_vote_llm" else 1
 

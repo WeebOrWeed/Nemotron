@@ -12,7 +12,7 @@ and retry on failure.
 START
   │
   ▼
-classify   (keyword match + build recommended DAG; gravity uses LLM QueryPlanner)
+classify   (keyword match + build recommended DAG; gravity/unit/numeral/cipher use LLM QueryPlanner)
   │          outputs: puzzle_type, thought_dag (sub-questions + tool assignments)
   ▼
 decompose  (first pass: forwards classifier's DAG unchanged)
@@ -49,11 +49,11 @@ each in the training set).
 | Type                 | Signature phrase                              | Task                                          |
 |----------------------|-----------------------------------------------|-----------------------------------------------|
 | `bit_manipulation`   | "bit manipulation"                            | Deduce bitwise op from examples, apply to new |
-| `cipher_decryption`  | "encryption rules"                            | Build substitution map, decrypt target text   |
+| `cipher_decryption`  | "encryption rules"                            | N parallel [split_word_pairs → build_char_map] → merge_char_maps → decrypt_substitution (fully deterministic) |
 | `equation_transform` | "transformation rules"                        | Build symbol map, transform target equation   |
-| `gravity_physics`    | "gravitational constant"                      | LLM planner builds per-pair mermaid DAG; tool expands into parallel chains; geometric mean (2dp) |
-| `numeral_conversion` | "numeral system"                              | Identify base from examples, convert target   |
-| `unit_conversion`    | "unit conversion"                             | Compute linear factor from examples, convert  |
+| `gravity_physics`    | "gravitational constant"                      | LLM planner builds per-pair parallel chains; geometric mean (2dp) |
+| `numeral_conversion` | "numeral system"                              | Parallel hypothesis testing (Roman + base 2-36); deterministic conversion |
+| `unit_conversion`    | "unit conversion"                             | Affine linear regression (y=ax+b); handles multiplicative and affine |
 
 ## DAG-of-Thoughts
 
@@ -76,6 +76,8 @@ class ThoughtNode(TypedDict):
 - `depends_on: ["a", "b"]` = blocked until both "a" and "b" have answers.
 - `tool: None` = LLM answers the question. `tool: "xor_binary"` = run the Python function.
 - Parent answers are interpolated into both `question` and `tool_input` via `{parent_id}`.
+- JSON sub-field access is supported: if a parent's answer is JSON, `{parent_id_field}`
+  expands to `answer["field"]` (e.g. `{linear_fit_slope}` from `{"slope":0.92,...}`).
 
 ### Execution Strategy: LLM-per-Step + Deterministic Fallback
 
@@ -90,8 +92,8 @@ Deterministic solvers are kept as fallbacks on retry.
 |----------------------|--------------------------------------------------------------------|
 | `gravity_physics`    | LLM planner → per-pair parallel chains: fill_eq_N → expand_N → g_N → d_symbolic_N → d_repr_N → **tool** `gravity_geom_mean_chain_exprs` (geometric mean, 2dp) |
 | `unit_conversion`    | LLM planner → extract_pairs (ask_llm) → **tool** `linear_fit` (least-squares y=ax+b) → **tool** `eval_math` round(a×target+b, 2) |
-| `numeral_conversion` | extract examples JSON + target decimal → infer system → express target |
-| `cipher_decryption`  | extract word pairs ∥ extract ciphertext → decrypt (substitution)   |
+| `numeral_conversion` | LLM planner → extract_data (ask_llm) → (**tool** `detect_numeral_system` ∥ llm_analyze) → reconcile → **tool** `convert_numeral` |
+| `cipher_decryption`  | N parallel [extract_pairs_i (split_word_pairs) → create_mapping_i (build_char_map)] → merge_mapping (merge_char_maps) → translate (decrypt_substitution) — fully deterministic |
 | `bit_manipulation`   | infer rule from all I/O pairs → apply rule to target 8-bit input   |
 | `equation_transform` | extract examples JSON + 5-char target → infer rule → apply to target |
 
@@ -99,15 +101,18 @@ Deterministic helpers (`solve_equation_transform`, `solve_bit_manipulation`,
 etc.) remain in `tools.py`. If `decompose` emits `solve_equation_transform`
 and it fails, `solver` still uses an LLM majority-vote fallback for that node.
 
-> **Migration in progress:** All six puzzle types use LLM-per-step DAGs in
-> `classify`. End-to-end solvers in `tools.py` support retries, optional tool
-> nodes from `decompose`, and targeted fallbacks in `solver`.
+> **LLM planner migration:** Four puzzle types (`gravity_physics`,
+> `unit_conversion`, `numeral_conversion`, `cipher_decryption`) use the
+> LLM-based `QueryPlanner` for DAG construction.  The remaining two
+> (`bit_manipulation`, `equation_transform`) use deterministic DAG templates.
+> End-to-end solvers in `tools.py` support retries and targeted fallbacks.
 
-### LLM Query Planner (gravity & unit conversion)
+### LLM Query Planner (gravity, unit, numeral & cipher)
 
-For `gravity_physics` and `unit_conversion`, the DAG is built by the
-**LLM Query Planner** (`src/planner.py`).  The planner runs at classify
-time (before DAG execution):
+For `gravity_physics`, `unit_conversion`, `numeral_conversion`, and
+`cipher_decryption`, the DAG is built by the **LLM Query Planner**
+(`src/planner.py`).  The planner runs at classify time (before DAG
+execution):
 
 1. **LLM call** — the puzzle prompt is sent to the LLM with a system
    prompt that instructs it to produce two sections:
@@ -180,6 +185,63 @@ a cross-check.
 - **No silent fallback:** if the LLM planner fails to produce parseable
   output even after repair, `QueryPlanner.plan_unit` raises an error.
 
+#### Numeral conversion — parallel hypothesis testing
+
+For `numeral_conversion`, the DAG has **5 nodes** with parallel
+hypothesis testing.  This generalizes beyond Roman numerals to handle
+any base (2-36) or custom numeral system:
+
+```
+extract_data (ask_llm) → pairs, target, unique symbols
+    ↓ parallel:
+detect_system (detect_numeral_system)   llm_analyze (ask_llm)
+    ↓                                       ↓
+             reconcile (ask_llm)
+                  ↓
+         convert_target (convert_numeral)
+```
+
+- **`detect_system`** deterministically tries Roman + all bases 2-36
+  against the examples, returning match counts.
+- **`llm_analyze`** lets the LLM reason about symbol patterns, positional
+  vs additive systems, and custom rules.
+- **`reconcile`** picks the best system: if the deterministic detector
+  found a perfect match (`all_correct=true`), it trusts it; otherwise
+  it considers the LLM's analysis.
+- **`convert_target`** applies the chosen system using the `convert_numeral`
+  tool (handles Roman, base-N, any base 2-36).
+
+The example pairs and target are also extracted from the prompt via regex
+as a cross-check, ensuring the `detect_system` tool always receives
+correct input.
+
+#### Cipher decryption — per-case parallel mapping
+
+For `cipher_decryption`, the entire pipeline is deterministic — no LLM
+calls.  Routes are extracted via regex, then each example is processed
+in parallel.
+
+```
+extract_pairs_1 (split_word_pairs) → create_mapping_1 (build_char_map) ─┐
+extract_pairs_2 (split_word_pairs) → create_mapping_2 (build_char_map) ─┤
+...                                                                     ─┤
+extract_pairs_N (split_word_pairs) → create_mapping_N (build_char_map) ─┘
+                                                                         ↓
+                                           merge_mapping (merge_char_maps)
+                                                                         ↓
+                                         translate (decrypt_substitution)
+```
+
+- **`extract_pairs_i`** (one per example, **parallel**) — deterministic
+  `split_word_pairs` splits encrypted and plain text into word pairs.
+- **`create_mapping_i`** — deterministic `build_char_map` aligns chars.
+- **`merge_mapping`** — deterministic `merge_char_maps` (majority vote).
+- **`translate`** — deterministic `decrypt_substitution` applies the
+  merged mapping, with vocabulary search for unmapped characters.
+
+The number of parallel chains equals the number of example lines
+(typically 5).  Tools are in `tools.py`.
+
 ### LLM-Generated DAGs (for retries and unknown types)
 
 On solver failure (retry) or for unknown puzzle types, the `decompose` node
@@ -225,15 +287,18 @@ upstream nodes.
 
 | Tool              | Purpose                                   |
 |-------------------|-------------------------------------------|
-| `build_char_map`  | Build substitution map from aligned pairs: `{"pairs": [["ucoov","queen"]]}` |
-| `substitute_chars`| Apply char mapping: `{"text": "ucoov", "mapping": {"u":"q",...}}` |
+| `build_char_map`       | Build substitution map from aligned pairs: `{"pairs": [["ucoov","queen"]]}` |
+| `substitute_chars`     | Apply char mapping: `{"text": "ucoov", "mapping": {"u":"q",...}}` |
+| `decrypt_substitution` | Decrypt ciphertext using map + vocab-guided permutation search for unmapped letters: `{"ciphertext": "trb", "mapping": {...}}` |
 
-**Numeral conversion** (100% Roman numerals in dataset):
+**Numeral conversion** (generalized: Roman + any base 2-36):
 
-| Tool         | Example                            | Result       |
-|--------------|------------------------------------|--------------|
-| `to_roman`   | `{"number": 38}`                   | `"XXXVIII"`  |
-| `from_roman` | `{"roman": "XXXVIII"}`             | `"38"`       |
+| Tool                    | Purpose                                         | Example                              |
+|-------------------------|-------------------------------------------------|--------------------------------------|
+| `to_roman`              | Integer to Roman numeral                        | `{"number": 38}` → `"XXXVIII"`      |
+| `from_roman`            | Roman numeral to integer                        | `{"roman": "XXXVIII"}` → `"38"`     |
+| `detect_numeral_system` | Try Roman + bases 2-36 against example pairs    | `{"pairs": [[38,"XXXVIII"],[15,"XV"]]}` → `{"system":"roman","all_correct":true,...}` |
+| `convert_numeral`       | Convert decimal to any detected system          | `{"number": 42, "system": "base_2"}` → `"101010"` |
 
 **Gravity physics** (d = 0.5gt^2):
 
@@ -247,7 +312,8 @@ upstream nodes.
 
 | Tool            | Purpose                                            |
 |-----------------|----------------------------------------------------|
-| `linear_factor` | Avg factor from pairs: `{"pairs": [[10.08, 6.69], ...]}` |
+| `linear_factor` | Avg multiplicative factor from pairs: `{"pairs": [[10.08, 6.69], ...]}` |
+| `linear_fit`    | Least-squares regression y=ax+b: `{"pairs": [[35.31,32.49],...]}` → `{"slope":a,"intercept":b}` |
 
 ## Threading Model
 
@@ -322,7 +388,7 @@ Nemotron/
     ├── config.py            # Env vars: MODEL_NAME, OLLAMA_BASE_URL, LLM_PROVIDER, etc.
     ├── llm_client.py        # Unified LLM client (Ollama local / DeepSeek API fallback)
     ├── state.py             # ThoughtNode, FailureRecord, GraphState
-    ├── classify.py          # Keyword classifier + DAG plan builder (gravity uses LLM planner)
+    ├── classify.py          # Keyword classifier + DAG plan builder (gravity/unit/numeral/cipher use LLM planner)
     ├── planner.py           # LLM QueryPlanner: mermaid topology + node dict → ThoughtNodes
     ├── decompose.py         # Pass-through on first pass; LLM re-decompose on retries
     ├── tools.py             # Deterministic tool functions (binary ops, math, substitution)
@@ -364,9 +430,9 @@ Nemotron/
 All LLM calls go through the unified `LLMClient` (`src/llm_client.py`),
 which dispatches to the selected backend.
 
-- In **classify**, gravity and unit conversion use the LLM-based
-  `QueryPlanner` to build per-pair DAGs; other types use deterministic DAG
-  templates.  Deterministic solvers in `tools.py` are used when `decompose`
+- In **classify**, gravity, unit conversion, numeral conversion, and cipher
+  decryption use the LLM-based `QueryPlanner` to build DAGs; other types use
+  deterministic DAG templates.  Deterministic solvers in `tools.py` are used when `decompose`
   emits them or for targeted fallbacks (e.g. failed `solve_equation_transform`
   node).
 

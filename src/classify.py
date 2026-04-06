@@ -1,9 +1,10 @@
 """Classifier that identifies the puzzle type AND produces an execution plan.
 
-For ``gravity_physics`` and ``unit_conversion`` the plan is produced by the
-LLM-based ``QueryPlanner`` (see ``src/planner.py``), which outputs a
-mermaid-style topology + node-metadata dict and builds per-pair ThoughtNodes.
-Other types use deterministic DAG templates.
+For ``gravity_physics``, ``unit_conversion``, ``numeral_conversion``, and
+``cipher_decryption`` the plan is produced by the LLM-based ``QueryPlanner``
+(see ``src/planner.py``), which outputs a mermaid-style topology +
+node-metadata dict and builds ThoughtNodes.  Other types use deterministic
+DAG templates.
 
 The classify node outputs both ``puzzle_type`` and ``thought_dag`` so the
 decompose step can use the plan directly -- the LLM only kicks in on retries.
@@ -29,103 +30,6 @@ PUZZLE_SIGNATURES: dict[str, str] = {
 # Each builder receives the raw prompt and returns a list[ThoughtNode].
 # The ``tool`` field tells the solver which deterministic tool (or LLM
 # fallback) to use for that step.
-
-def _plan_numeral(prompt: str) -> list[ThoughtNode]:
-    return [
-        ThoughtNode(
-            id="extract_data",
-            question=(
-                "Read the numeral-system puzzle below. Extract every example that "
-                "relates a conventional number (usually Arabic digits) to the "
-                "puzzle's numeral notation, and the target decimal integer you "
-                "must express in that notation.\n\n"
-                f"{prompt}\n\n"
-                "Output ONLY valid JSON, nothing else:\n"
-                '{"examples": [["12", "XII"], ["5", "V"]], "target_decimal": 2024}\n'
-                "(Use [] for examples if the puzzle only states the target number.)"
-            ),
-            depends_on=[],
-            tool="ask_llm",
-            tool_input=None,
-            answer=None,
-        ),
-        ThoughtNode(
-            id="infer_system",
-            question=(
-                "Puzzle data (JSON):\n{extract_data}\n\n"
-                "Which numeral system does the puzzle use (e.g. Roman, another "
-                "base)? Summarize rules visible in the examples. "
-                "End with a line: TARGET_DECIMAL=<integer> matching target_decimal."
-            ),
-            depends_on=["extract_data"],
-            tool="ask_llm",
-            tool_input=None,
-            answer=None,
-        ),
-        ThoughtNode(
-            id="express_target",
-            question=(
-                "Data:\n{extract_data}\n\nSystem summary:\n{infer_system}\n\n"
-                "Express the target integer in the required notation only "
-                "(e.g. standard Roman: I,V,X,L,C,D,M). "
-                "Output ONLY that representation on the last line, no words."
-            ),
-            depends_on=["infer_system", "extract_data"],
-            tool="ask_llm",
-            tool_input=None,
-            answer=None,
-        ),
-    ]
-
-
-def _plan_cipher(prompt: str) -> list[ThoughtNode]:
-    return [
-        ThoughtNode(
-            id="extract_word_pairs",
-            question=(
-                "Read the cipher puzzle below. From each example line, list "
-                "aligned (encrypted_word, plain_word) pairs in order—every pair "
-                "that shows the encryption rule.\n\n"
-                f"{prompt}\n\n"
-                "Output ONLY valid JSON, nothing else:\n"
-                '{"pairs": [["encrypted_word", "plain_word"], ...]}'
-            ),
-            depends_on=[],
-            tool="ask_llm",
-            tool_input=None,
-            answer=None,
-        ),
-        ThoughtNode(
-            id="extract_cipher",
-            question=(
-                "Read the cipher puzzle below. What is the exact ciphertext "
-                "string you must decrypt (the line after \"decrypt\" or similar)?\n\n"
-                f"{prompt}\n\n"
-                "Output ONLY that ciphertext on the last line—same spelling and "
-                "spacing as in the puzzle."
-            ),
-            depends_on=[],
-            tool="ask_llm",
-            tool_input=None,
-            answer=None,
-        ),
-        ThoughtNode(
-            id="decrypt",
-            question=(
-                "Example alignments (JSON):\n{extract_word_pairs}\n\n"
-                "Ciphertext to decrypt:\n{extract_cipher}\n\n"
-                "Infer a consistent per-letter substitution from the examples "
-                "(lowercase English as in the plaintexts). Decrypt the ciphertext. "
-                "Output ONLY the decrypted plaintext on the last line "
-                "(lowercase words separated by spaces)."
-            ),
-            depends_on=["extract_word_pairs", "extract_cipher"],
-            tool="ask_llm",
-            tool_input=None,
-            answer=None,
-        ),
-    ]
-
 
 def _plan_bit(prompt: str) -> list[ThoughtNode]:
     return [
@@ -230,16 +134,16 @@ def _plan_equation(prompt: str) -> list[ThoughtNode]:
 def make_classify_node(llm: LLMClient):
     """Factory that returns the classify node function with the LLM client bound.
 
-    Gravity and unit conversion use the LLM-based ``QueryPlanner``; other
-    types use deterministic DAG templates.
+    Gravity, unit conversion, numeral conversion, and cipher decryption use the
+    LLM-based ``QueryPlanner``; other types use deterministic DAG templates.
     """
     planner = QueryPlanner(llm)
 
     plan_builders: dict[str, callable] = {
         "gravity_physics": planner.plan_gravity,
         "unit_conversion": planner.plan_unit,
-        "numeral_conversion": _plan_numeral,
-        "cipher_decryption": _plan_cipher,
+        "numeral_conversion": planner.plan_numeral,
+        "cipher_decryption": planner.plan_cipher,
         "bit_manipulation": _plan_bit,
         "equation_transform": _plan_equation,
     }
