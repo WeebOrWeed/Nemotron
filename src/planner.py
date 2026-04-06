@@ -300,104 +300,22 @@ def _build_gravity_dag(
     nodes_dict: dict[str, dict],
     prompt: str,
 ) -> list[ThoughtNode]:
-    """Combine mermaid edges + ThoughtNode metadata into ThoughtNodes.
+    """Build a single-node deterministic DAG for gravity physics.
 
-    Each entry in *nodes_dict* is already ThoughtNode-shaped (id, question,
-    tool, tool_input).  If the LLM omitted ``question`` or ``tool_input``,
-    we fall back to deterministic templates.
-
-    Dependencies are derived from gravity naming rules (not the LLM mermaid)
-    to guarantee correct parallel topology.
+    solve_gravity_physics handles everything: regex-extract (t,d) pairs
+    and target_t, compute g per pair, geometric-mean g, d = 0.5*g*t².
     """
-
-    # Extract formula and query_t
-    func = "d = 0.5*g*t^2"
-    query_t = 0.0
-    for meta in nodes_dict.values():
-        if meta.get("id") == "extract_spec" and "formula" in meta:
-            func = meta["formula"]
-        if "query_t" in meta:
-            query_t = float(meta["query_t"])
-    if query_t == 0.0:
-        qt_match = re.search(r"query_t\s*[=:]\s*(\d+(?:\.\d+)?)", str(nodes_dict))
-        if qt_match:
-            query_t = float(qt_match.group(1))
-
-    # Collect pair data from fill_eq nodes so we can propagate t,d downstream.
-    # Try explicit t/d fields first; fall back to extracting from question text
-    # using a pattern that matches "t=X, d=Y" or "t=X ... d=Y" after "Pair".
-    pair_data: dict[str, dict] = {}
-    for meta in nodes_dict.values():
-        nid = meta.get("id", "")
-        m = re.match(r"fill_eq_(\d+)", nid)
-        if m:
-            t_val = meta.get("t")
-            d_val = meta.get("d")
-            if t_val is None or d_val is None:
-                q = meta.get("question", "")
-                pair_m = re.search(
-                    r"[Pp]air\s*\d+\s*:\s*t\s*[=:]\s*(\d+(?:\.\d+)?)\s*[,;]\s*d\s*[=:]\s*(\d+(?:\.\d+)?)",
-                    q,
-                )
-                if pair_m:
-                    if t_val is None:
-                        t_val = float(pair_m.group(1))
-                    if d_val is None:
-                        d_val = float(pair_m.group(2))
-            pair_data[m.group(1)] = {"t": t_val, "d": d_val}
-
-    # Pre-collect d_repr IDs for eval_geom_mean_d
-    d_repr_ids = sorted(
-        [meta["id"] for meta in nodes_dict.values()
-         if meta.get("id", "").startswith("d_repr_")],
-        key=lambda s: int(re.search(r"\d+", s).group()),
-    )
-
-    def _n_sort(key: str) -> int:
-        m = re.match(r"N(\d+)", key)
-        return int(m.group(1)) if m else 0
-
-    dag: list[ThoughtNode] = []
-
-    # Known tool overrides — the LLM sometimes assigns the wrong tool
-    _TOOL_OVERRIDE: dict[str, str] = {
-        "eval_geom_mean_d": "gravity_geom_mean_chain_exprs",
-    }
-
-    for n_key in sorted(nodes_dict, key=_n_sort):
-        meta = nodes_dict[n_key]
-        node_id = meta["id"]
-        tool = _TOOL_OVERRIDE.get(node_id, meta.get("tool") or "ask_llm")
-
-        depends_on = _gravity_depends_on(node_id, d_repr_ids)
-
-        # Always use detailed templates for question text — they embed
-        # concrete pair values and worked-example output that the small
-        # execution model needs to follow symbolic manipulation correctly.
-        enriched = dict(meta)
-        m_idx = re.match(r"(?:fill_eq|expand|g|d_symbolic|d_repr)_(\d+)", node_id)
-        if m_idx:
-            pd = pair_data.get(m_idx.group(1), {})
-            enriched.setdefault("t", pd.get("t"))
-            enriched.setdefault("d", pd.get("d"))
-        question = _gravity_question(node_id, enriched, prompt, func, query_t)
-
-        tool_input = meta.get("tool_input")
-
-        if node_id == "eval_geom_mean_d":
-            if not tool_input:
-                tool_input = "\n".join("{" + did + "}" for did in d_repr_ids)
-
-        dag.append(ThoughtNode(
-            id=node_id,
-            question=question,
-            depends_on=depends_on,
-            tool=tool,
-            tool_input=tool_input,
+    import json as _json
+    return [
+        ThoughtNode(
+            id="solve_gravity",
+            question="Solve gravity physics deterministically.",
+            depends_on=[],
+            tool="solve_gravity_physics",
+            tool_input=_json.dumps({"prompt": prompt}),
             answer=None,
-        ))
-
-    return dag
+        ),
+    ]
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -478,67 +396,22 @@ def _build_unit_dag(
     nodes_dict: dict[str, dict],
     prompt: str,
 ) -> list[ThoughtNode]:
-    """Build a 3-node unit conversion DAG using affine linear regression.
+    """Build a single-node deterministic DAG for unit conversion.
 
-    The DAG is always: extract_pairs → linear_fit → apply_convert.
-    This handles both multiplicative (y=ax) and affine (y=ax+b) conversions.
-    The LLM planner output is used only for the target value; node structure
-    is fully deterministic.
+    solve_unit_conversion handles everything: regex-extract pairs and
+    target, majority-vote on factor, multiply.
     """
-
-    target = _extract_target(prompt)
-
-    # Also try extracting from apply_convert tool_input in planner output
-    if target == 0.0:
-        for meta in nodes_dict.values():
-            if meta.get("id") == "apply_convert" and meta.get("tool_input"):
-                tgt_m = re.search(r"\*\s*(\d+(?:\.\d+)?)", meta["tool_input"])
-                if tgt_m:
-                    target = float(tgt_m.group(1))
-                    break
-
-    prompt_pairs = _extract_prompt_pairs(prompt)
-    pairs_json = json.dumps(
-        [[fv, tv] for fv, tv in prompt_pairs]
-    )
-
-    dag: list[ThoughtNode] = [
+    import json as _json
+    return [
         ThoughtNode(
-            id="extract_pairs",
-            question=(
-                "Read the unit conversion puzzle below. Extract ALL example "
-                "conversions as [from_value, to_value] pairs (numbers only), "
-                "and the target value the puzzle asks you to convert.\n\n"
-                f"{prompt}\n\n"
-                "Output ONLY valid JSON in this exact format, nothing else:\n"
-                '{"pairs": [[from1, to1], [from2, to2], ...], "target": <number>}'
-            ),
+            id="solve_unit",
+            question="Solve unit conversion deterministically.",
             depends_on=[],
-            tool="ask_llm",
-            tool_input=None,
-            answer=None,
-        ),
-        ThoughtNode(
-            id="linear_fit",
-            question="Fit y = ax + b to all extracted (from, to) pairs using least-squares regression.",
-            depends_on=["extract_pairs"],
-            tool="linear_fit",
-            tool_input="{extract_pairs}",
-            answer=None,
-        ),
-        ThoughtNode(
-            id="apply_convert",
-            question=f"Apply the fitted linear model (slope, intercept) to convert target={target}, round to 2dp.",
-            depends_on=["linear_fit"],
-            tool="eval_math",
-            tool_input=json.dumps(
-                {"expr": f"round({{linear_fit_slope}} * {target} + {{linear_fit_intercept}}, 2)"}
-            ),
+            tool="solve_unit_conversion",
+            tool_input=_json.dumps({"prompt": prompt}),
             answer=None,
         ),
     ]
-
-    return dag
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -608,112 +481,22 @@ def _build_numeral_dag(
     nodes_dict: dict[str, dict],
     prompt: str,
 ) -> list[ThoughtNode]:
-    """Build a 5-node numeral conversion DAG with parallel hypothesis testing.
+    """Build a single-node deterministic DAG for numeral conversion.
 
-    Structure:
-      extract_data → (detect_system ∥ llm_analyze) → reconcile → convert_target
-
-    detect_system deterministically tries Roman + bases 2-36.
-    llm_analyze lets the LLM reason about patterns/custom systems.
-    reconcile picks the best system.  convert_target applies it.
+    solve_numeral_conversion handles everything: detect Roman numerals
+    from the prompt and convert the target number.
     """
-    target = _extract_target_number(prompt)
-    if target is None:
-        raise ValueError(
-            "Could not extract target number from numeral conversion prompt"
-        )
-
-    pairs = _extract_numeral_pairs(prompt)
-    pairs_json = json.dumps(pairs)
-
-    dag: list[ThoughtNode] = [
-        # N1: extract data
+    import json as _json
+    return [
         ThoughtNode(
-            id="extract_data",
-            question=(
-                "Read the numeral-system puzzle below. Extract:\n"
-                "1. Every example as [decimal_number, notation_string]\n"
-                "2. The target decimal number to convert\n"
-                "3. All unique symbols you see in the notation outputs\n\n"
-                f"{prompt}\n\n"
-                "Output ONLY valid JSON:\n"
-                '{"pairs": [[38, "XXXVIII"], ...], "target": 38, '
-                '"symbols": ["I","V","X","L","C","D","M"]}'
-            ),
+            id="solve_numeral",
+            question="Solve numeral conversion deterministically.",
             depends_on=[],
-            tool="ask_llm",
-            tool_input=None,
-            answer=None,
-        ),
-        # N2: deterministic detection (parallel with N3)
-        ThoughtNode(
-            id="detect_system",
-            question=(
-                "Detect the numeral system by testing all known systems "
-                "(Roman, base 2-36) against the example pairs."
-            ),
-            depends_on=["extract_data"],
-            tool="detect_numeral_system",
-            tool_input=json.dumps({"pairs": pairs}),
-            answer=None,
-        ),
-        # N3: LLM analysis (parallel with N2)
-        ThoughtNode(
-            id="llm_analyze",
-            question=(
-                "Analyze these numeral conversion examples:\n"
-                f"{pairs_json}\n\n"
-                "For each example, study the notation output:\n"
-                "- What unique symbols appear? How many?\n"
-                "- Is it positional (like binary/hex) or additive/subtractive "
-                "(like Roman)?\n"
-                "- If positional: what base? The number of unique symbols "
-                "often equals the base.\n"
-                "- If Roman-like: I=1, V=5, X=10, L=50, C=100, D=500, M=1000?\n"
-                "- Could it be a custom system with non-standard symbols?\n\n"
-                "Conclude with ONE line:\n"
-                "SYSTEM=roman  OR  SYSTEM=base_N  (e.g. SYSTEM=base_16)\n"
-                "If unsure, give your best guess."
-            ),
-            depends_on=["extract_data"],
-            tool="ask_llm",
-            tool_input=None,
-            answer=None,
-        ),
-        # N4: reconcile
-        ThoughtNode(
-            id="reconcile",
-            question=(
-                "Deterministic detection result:\n{detect_system}\n\n"
-                "LLM analysis:\n{llm_analyze}\n\n"
-                "Pick the numeral system. Rules:\n"
-                "- If detect_system shows all_correct=true, TRUST it.\n"
-                "- If detect_system failed (all_correct=false), consider "
-                "the LLM analysis.\n"
-                "- If both disagree and neither is confident, go with "
-                "detect_system's best match.\n\n"
-                "Output ONLY one line: SYSTEM=roman  or  SYSTEM=base_N"
-            ),
-            depends_on=["detect_system", "llm_analyze"],
-            tool="ask_llm",
-            tool_input=None,
-            answer=None,
-        ),
-        # N5: convert target
-        ThoughtNode(
-            id="convert_target",
-            question=f"Convert {target} using the reconciled system.",
-            depends_on=["reconcile"],
-            tool="convert_numeral",
-            tool_input=json.dumps({
-                "number": target,
-                "system": "{reconcile}",
-            }),
+            tool="solve_numeral_conversion",
+            tool_input=_json.dumps({"prompt": prompt}),
             answer=None,
         ),
     ]
-
-    return dag
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -897,36 +680,20 @@ class QueryPlanner:
     # ── gravity ────────────────────────────────────────────────────
 
     def plan_gravity(self, prompt: str) -> list[ThoughtNode]:
-        """Plan a gravity physics puzzle via LLM planner.
-
-        Raises if the LLM output cannot be parsed into a valid DAG.
-        """
-        return self._llm_plan(GRAVITY_PLANNER_SYSTEM, prompt, _build_gravity_dag)
+        """Build a fully deterministic gravity physics DAG (no LLM)."""
+        return _build_gravity_dag([], {}, prompt)
 
     # ── unit conversion ────────────────────────────────────────────
 
     def plan_unit(self, prompt: str) -> list[ThoughtNode]:
-        """Plan a unit conversion puzzle via LLM planner.
-
-        Raises if the LLM output cannot be parsed into a valid DAG.
-        """
-        return self._llm_plan(UNIT_PLANNER_SYSTEM, prompt, _build_unit_dag)
+        """Build a fully deterministic unit conversion DAG (no LLM)."""
+        return _build_unit_dag([], {}, prompt)
 
     # ── numeral conversion ────────────────────────────────────────
 
     def plan_numeral(self, prompt: str) -> list[ThoughtNode]:
-        """Plan a numeral conversion puzzle via LLM planner.
-
-        Falls back to building the DAG directly from the prompt if the
-        planner output can't be parsed — the DAG shape is fixed (5 nodes)
-        so no planner information is actually lost.
-        """
-        try:
-            return self._llm_plan(
-                NUMERAL_PLANNER_SYSTEM, prompt, _build_numeral_dag
-            )
-        except (ValueError, KeyError):
-            return _build_numeral_dag([], {}, prompt)
+        """Build a fully deterministic numeral conversion DAG (no LLM)."""
+        return _build_numeral_dag([], {}, prompt)
 
     # ── cipher decryption ─────────────────────────────────────────
 

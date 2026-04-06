@@ -12,7 +12,7 @@ and retry on failure.
 START
   │
   ▼
-classify   (keyword match + build recommended DAG; gravity/unit/numeral/cipher use LLM QueryPlanner)
+classify   (keyword match + build deterministic DAG via QueryPlanner — zero LLM calls)
   │          outputs: puzzle_type, thought_dag (sub-questions + tool assignments)
   ▼
 decompose  (first pass: forwards classifier's DAG unchanged)
@@ -51,9 +51,9 @@ each in the training set).
 | `bit_manipulation`   | "bit manipulation"                            | solve_bit_manipulation: brute-force per-bit boolean function search (fully deterministic) |
 | `cipher_decryption`  | "encryption rules"                            | N parallel [split_word_pairs → build_char_map] → merge_char_maps → decrypt_substitution (fully deterministic) |
 | `equation_transform` | "transformation rules"                        | solve_equation_transform: operator-centric compound-operation search (fully deterministic) |
-| `gravity_physics`    | "gravitational constant"                      | LLM planner builds per-pair parallel chains; geometric mean (2dp) |
-| `numeral_conversion` | "numeral system"                              | Parallel hypothesis testing (Roman + base 2-36); deterministic conversion |
-| `unit_conversion`    | "unit conversion"                             | Affine linear regression (y=ax+b); handles multiplicative and affine |
+| `gravity_physics`    | "gravitational constant"                      | solve_gravity_physics: regex-extract (t,d) pairs, per-pair g, geometric mean, d=0.5*g*t² (fully deterministic) |
+| `numeral_conversion` | "numeral system"                              | solve_numeral_conversion: detect Roman numerals and convert target (fully deterministic) |
+| `unit_conversion`    | "unit conversion"                             | solve_unit_conversion: regex-extract pairs, majority-vote factor, multiply (fully deterministic) |
 
 ## DAG-of-Thoughts
 
@@ -79,142 +79,37 @@ class ThoughtNode(TypedDict):
 - JSON sub-field access is supported: if a parent's answer is JSON, `{parent_id_field}`
   expands to `answer["field"]` (e.g. `{linear_fit_slope}` from `{"slope":0.92,...}`).
 
-### Execution Strategy: LLM-per-Step + Deterministic Fallback
+### Execution Strategy: Fully Deterministic
 
-Each puzzle type is solved by breaking the problem into focused LLM
-sub-steps (the DAG-of-Thoughts approach). This demonstrates reasoning
-technique improvement using Nemotron, which is the goal of the challenge.
-Deterministic solvers are kept as fallbacks on retry.
+All six puzzle types are solved with **zero LLM calls** during DAG
+execution. Each type has a deterministic solver in `tools.py` that
+handles the full puzzle end-to-end. The `QueryPlanner` builds
+single-node (or multi-node for cipher) DAGs that invoke these solvers
+directly.
 
-**LLM-per-step (primary path):**
+| Type                 | DAG Structure                                                       |
+|----------------------|---------------------------------------------------------------------|
+| `gravity_physics`    | Single node: `solve_gravity_physics` — regex-extract (t,d) pairs, per-pair g, geometric mean, d=0.5×g×t² |
+| `unit_conversion`    | Single node: `solve_unit_conversion` — regex-extract pairs & target, majority-vote factor, multiply |
+| `numeral_conversion` | Single node: `solve_numeral_conversion` — detect Roman numerals, convert target |
+| `cipher_decryption`  | N parallel [split_word_pairs → build_char_map] → merge_char_maps → decrypt_substitution |
+| `bit_manipulation`   | Single node: `solve_bit_manipulation` — brute-force per-bit boolean function search |
+| `equation_transform` | Single node: `solve_equation_transform` — operator-centric compound-operation search |
 
-| Type                 | DAG Nodes (all LLM)                                                |
-|----------------------|--------------------------------------------------------------------|
-| `gravity_physics`    | LLM planner → per-pair parallel chains: fill_eq_N → expand_N → g_N → d_symbolic_N → d_repr_N → **tool** `gravity_geom_mean_chain_exprs` (geometric mean, 2dp) |
-| `unit_conversion`    | LLM planner → extract_pairs (ask_llm) → **tool** `linear_fit` (least-squares y=ax+b) → **tool** `eval_math` round(a×target+b, 2) |
-| `numeral_conversion` | LLM planner → extract_data (ask_llm) → (**tool** `detect_numeral_system` ∥ llm_analyze) → reconcile → **tool** `convert_numeral` |
-| `cipher_decryption`  | N parallel [extract_pairs_i (split_word_pairs) → create_mapping_i (build_char_map)] → merge_mapping (merge_char_maps) → translate (decrypt_substitution) — fully deterministic |
-| `bit_manipulation`   | solve_bit_manipulation (single deterministic node — brute-force per-bit boolean search) |
-| `equation_transform` | solve_equation_transform (single deterministic node — operator-centric compound-operation search) |
+If a deterministic solver fails, `solver` still uses an LLM retry fallback.
 
-Deterministic solvers (`solve_equation_transform`, `solve_bit_manipulation`,
-etc.) remain in `tools.py` and are the primary path for their puzzle types.
-If a solver fails, `solver` still uses an LLM majority-vote fallback.
+### QueryPlanner (all 6 types — fully deterministic)
 
-> **LLM planner migration:** Four puzzle types (`gravity_physics`,
-> `unit_conversion`, `numeral_conversion`, `cipher_decryption`) use the
-> All six puzzle types use the `QueryPlanner` for DAG construction.
-> `bit_manipulation` and `equation_transform` use single deterministic
-> solver nodes; the others use multi-node DAGs.
-> End-to-end solvers in `tools.py` support retries and targeted fallbacks.
+All six puzzle types use the `QueryPlanner` (`src/planner.py`) to build
+DAGs at classify time. No LLM calls are made during planning — each
+type has a `_build_*_dag` function that constructs ThoughtNodes directly:
 
-### LLM Query Planner (gravity, unit, numeral & cipher)
-
-For `gravity_physics`, `unit_conversion`, `numeral_conversion`, and
-`cipher_decryption`, the DAG is built by the **LLM Query Planner**
-(`src/planner.py`).  The planner runs at classify time (before DAG
-execution):
-
-1. **LLM call** — the puzzle prompt is sent to the LLM with a system
-   prompt that instructs it to produce two sections:
-
-   **MERMAID** — a directed-graph topology using N-numbered nodes:
-   ```
-   START --> N1
-   N1 --> N2
-   N1 --> N3
-   N2 --> N4
-   ...
-   Nk --> END
-   ```
-
-   **NODES** — a JSON dict mapping each N-key to a ThoughtNode
-   (minus `depends_on`, which is derived from the mermaid edges):
-   ```json
-   {
-     "N1": {"id": "extract_spec", "question": "Extract pairs, formula, query_t as JSON.", "tool": "ask_llm", "tool_input": null},
-     "N2": {"id": "fill_eq_1", "question": "Formula: d = 0.5*g*t^2. Pair 1: t=3.88, d=109.74. Substitute.", "tool": "ask_llm", "tool_input": null},
-     ...
-     "Nk": {"id": "eval_geom_mean_d", "question": "Geometric mean of d_k values, rounded to 2dp.", "tool": "gravity_geom_mean_chain_exprs", "tool_input": "{d_repr_1}\n{d_repr_2}"}
-   }
-   ```
-
-2. **Parse** — extract edges from the mermaid section and the JSON dict
-   from the nodes section.
-
-3. **Build DAG** — combine topology (`depends_on` from edges) with each
-   ThoughtNode's `id`, `question`, `tool`, and `tool_input`.  If the LLM
-   omits the `question` field, the builder falls back to deterministic
-   templates keyed on the node-id prefix.
-
-Each observation pair `i` gets an independent 5-node chain:
-
-```
-fill_eq_i  →  expand_i  →  g_i  →  d_symbolic_i  →  d_repr_i
-```
-
-All `d_repr_i` feed into a final `eval_geom_mean_d` (tool node).  Because
-pairs are independent, all `fill_eq_*` run in parallel, then all `expand_*`,
-etc., giving N-wide parallelism per batch (N = number of pairs).
-
-#### Unit conversion — affine linear regression
-
-For `unit_conversion`, the DAG is always exactly **3 nodes**.  Instead
-of per-pair multiplicative factors, we use **least-squares linear
-regression** (`y = ax + b`) which handles both multiplicative (b≈0) and
-affine conversions (e.g. Fahrenheit→Celsius where b≠0):
-
-```
-extract_pairs (ask_llm)
-    ↓
-linear_fit (tool: linear_fit) → {"slope": a, "intercept": b}
-    ↓
-apply_convert (tool: eval_math): round(a * target + b, 2)
-```
-
-The solver's `_interpolate_parents` supports JSON sub-field access:
-`{linear_fit_slope}` and `{linear_fit_intercept}` expand to the
-respective values from the `linear_fit` answer.
-
-**Robustness:** the DAG structure is fully deterministic — the builder
-always emits these 3 nodes regardless of what the LLM planner returns.
-The pairs and target are extracted directly from the prompt via regex as
-a cross-check.
-
-- **JSON repair:** truncated JSON (unbalanced braces / brackets) is
-  auto-repaired before parsing.
-- **No silent fallback:** if the LLM planner fails to produce parseable
-  output even after repair, `QueryPlanner.plan_unit` raises an error.
-
-#### Numeral conversion — parallel hypothesis testing
-
-For `numeral_conversion`, the DAG has **5 nodes** with parallel
-hypothesis testing.  This generalizes beyond Roman numerals to handle
-any base (2-36) or custom numeral system:
-
-```
-extract_data (ask_llm) → pairs, target, unique symbols
-    ↓ parallel:
-detect_system (detect_numeral_system)   llm_analyze (ask_llm)
-    ↓                                       ↓
-             reconcile (ask_llm)
-                  ↓
-         convert_target (convert_numeral)
-```
-
-- **`detect_system`** deterministically tries Roman + all bases 2-36
-  against the examples, returning match counts.
-- **`llm_analyze`** lets the LLM reason about symbol patterns, positional
-  vs additive systems, and custom rules.
-- **`reconcile`** picks the best system: if the deterministic detector
-  found a perfect match (`all_correct=true`), it trusts it; otherwise
-  it considers the LLM's analysis.
-- **`convert_target`** applies the chosen system using the `convert_numeral`
-  tool (handles Roman, base-N, any base 2-36).
-
-The example pairs and target are also extracted from the prompt via regex
-as a cross-check, ensuring the `detect_system` tool always receives
-correct input.
+- **`gravity_physics`**: single `solve_gravity_physics` node
+- **`unit_conversion`**: single `solve_unit_conversion` node
+- **`numeral_conversion`**: single `solve_numeral_conversion` node
+- **`bit_manipulation`**: single `solve_bit_manipulation` node
+- **`equation_transform`**: single `solve_equation_transform` node
+- **`cipher_decryption`**: multi-node pipeline (N parallel extract+map → merge → translate)
 
 #### Cipher decryption — per-case parallel mapping
 
@@ -374,7 +269,7 @@ class GraphState(TypedDict):
 
 ```
 Nemotron/
-├── main.py                 # CLI entry point with --verbose DAG trace
+├── main.py                 # CLI entry point with --verbose DAG trace and --types filter
 ├── trace_row.py            # Optional: run one train id, print each DAG step I/O
 ├── requirements.txt        # Python dependencies
 ├── design.md               # This file
@@ -389,8 +284,8 @@ Nemotron/
     ├── config.py            # Env vars: MODEL_NAME, OLLAMA_BASE_URL, LLM_PROVIDER, etc.
     ├── llm_client.py        # Unified LLM client (Ollama local / DeepSeek API fallback)
     ├── state.py             # ThoughtNode, FailureRecord, GraphState
-    ├── classify.py          # Keyword classifier + DAG plan builder (gravity/unit/numeral/cipher use LLM planner)
-    ├── planner.py           # LLM QueryPlanner: mermaid topology + node dict → ThoughtNodes
+    ├── classify.py          # Keyword classifier + deterministic DAG plan builder (all 6 types)
+    ├── planner.py           # QueryPlanner: deterministic DAG builders for all puzzle types
     ├── decompose.py         # Pass-through on first pass; LLM re-decompose on retries
     ├── tools.py             # Deterministic tool functions (binary ops, math, substitution)
     ├── solver.py            # Threaded DAG solver; LLM nodes store full reply, sink answer = last line
@@ -431,10 +326,9 @@ Nemotron/
 All LLM calls go through the unified `LLMClient` (`src/llm_client.py`),
 which dispatches to the selected backend.
 
-- In **classify**, gravity, unit conversion, numeral conversion, and cipher
-  decryption use the LLM-based `QueryPlanner` to build DAGs; other types use
-  the `QueryPlanner`.  Deterministic solvers in `tools.py` are used as primary
-  paths or fallbacks.
+- In **classify**, all six puzzle types use the `QueryPlanner` to build
+  fully deterministic DAGs — zero LLM calls.  Deterministic solvers in
+  `tools.py` handle the actual computation.
 
 ## Setup
 
@@ -474,7 +368,38 @@ python main.py --help
 | `--output`  | Output CSV path               | `results/predictions.csv` |
 | `--limit`   | Max rows to process           | all                       |
 | `--verbose` | Print DAG execution trace     | off                       |
+| `--types`   | Comma-separated puzzle types  | all types                 |
 
 When the CSV has an `answer` column, printed **accuracy** treats two answers as
 a match if strings are equal after strip, or if both parse as floats with
 **absolute difference ≤ 10⁻²** (inclusive, plus a tiny epsilon for rounding).
+
+## Discussion
+
+### Expanding the tool set per puzzle type
+
+Each puzzle type currently has a narrow set of tools tailored to the patterns
+observed in the training data.  A natural next step is to broaden the tool
+inventory for each category — for instance, adding more bitwise primitives
+(population count, Gray code conversion, bit-field extraction), richer
+numerical helpers (median, weighted average, polynomial fitting), or
+domain-specific utilities (frequency analysis for ciphers, modular arithmetic
+for equation transforms).  With a larger toolkit the LLM planner gains more
+building blocks to compose solutions for question variants it has not seen
+before, rather than being limited to the exact patterns the current tools were
+designed for.
+
+### Toward a type-agnostic, general-purpose runner
+
+Today the pipeline classifies a puzzle first and then selects a type-specific
+DAG plan.  A more ambitious direction is to make the tools themselves
+general enough that the planner does not need to know the puzzle type at all.
+Instead of `solve_gravity_physics` or `solve_cipher_decryption`, the system
+would expose composable primitives — regex extraction, table lookup,
+arithmetic evaluation, string substitution, statistical fitting, symbolic
+equation solving — that apply across every category.  The planner would then
+treat any incoming prompt the same way: read it, decide which primitives to
+chain together, and execute the resulting DAG.  This would make the pipeline a
+truly indiscriminate reasoning engine, able to generalise to new puzzle types
+or mixed-domain questions without any classification step or type-specific
+code paths.
