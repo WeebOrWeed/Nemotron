@@ -48,9 +48,9 @@ each in the training set).
 
 | Type                 | Signature phrase                              | Task                                          |
 |----------------------|-----------------------------------------------|-----------------------------------------------|
-| `bit_manipulation`   | "bit manipulation"                            | Deduce bitwise op from examples, apply to new |
+| `bit_manipulation`   | "bit manipulation"                            | solve_bit_manipulation: brute-force per-bit boolean function search (fully deterministic) |
 | `cipher_decryption`  | "encryption rules"                            | N parallel [split_word_pairs → build_char_map] → merge_char_maps → decrypt_substitution (fully deterministic) |
-| `equation_transform` | "transformation rules"                        | Build symbol map, transform target equation   |
+| `equation_transform` | "transformation rules"                        | solve_equation_transform: operator-centric compound-operation search (fully deterministic) |
 | `gravity_physics`    | "gravitational constant"                      | LLM planner builds per-pair parallel chains; geometric mean (2dp) |
 | `numeral_conversion` | "numeral system"                              | Parallel hypothesis testing (Roman + base 2-36); deterministic conversion |
 | `unit_conversion`    | "unit conversion"                             | Affine linear regression (y=ax+b); handles multiplicative and affine |
@@ -94,17 +94,18 @@ Deterministic solvers are kept as fallbacks on retry.
 | `unit_conversion`    | LLM planner → extract_pairs (ask_llm) → **tool** `linear_fit` (least-squares y=ax+b) → **tool** `eval_math` round(a×target+b, 2) |
 | `numeral_conversion` | LLM planner → extract_data (ask_llm) → (**tool** `detect_numeral_system` ∥ llm_analyze) → reconcile → **tool** `convert_numeral` |
 | `cipher_decryption`  | N parallel [extract_pairs_i (split_word_pairs) → create_mapping_i (build_char_map)] → merge_mapping (merge_char_maps) → translate (decrypt_substitution) — fully deterministic |
-| `bit_manipulation`   | infer rule from all I/O pairs → apply rule to target 8-bit input   |
-| `equation_transform` | extract examples JSON + 5-char target → infer rule → apply to target |
+| `bit_manipulation`   | solve_bit_manipulation (single deterministic node — brute-force per-bit boolean search) |
+| `equation_transform` | solve_equation_transform (single deterministic node — operator-centric compound-operation search) |
 
-Deterministic helpers (`solve_equation_transform`, `solve_bit_manipulation`,
-etc.) remain in `tools.py`. If `decompose` emits `solve_equation_transform`
-and it fails, `solver` still uses an LLM majority-vote fallback for that node.
+Deterministic solvers (`solve_equation_transform`, `solve_bit_manipulation`,
+etc.) remain in `tools.py` and are the primary path for their puzzle types.
+If a solver fails, `solver` still uses an LLM majority-vote fallback.
 
 > **LLM planner migration:** Four puzzle types (`gravity_physics`,
 > `unit_conversion`, `numeral_conversion`, `cipher_decryption`) use the
-> LLM-based `QueryPlanner` for DAG construction.  The remaining two
-> (`bit_manipulation`, `equation_transform`) use deterministic DAG templates.
+> All six puzzle types use the `QueryPlanner` for DAG construction.
+> `bit_manipulation` and `equation_transform` use single deterministic
+> solver nodes; the others use multi-node DAGs.
 > End-to-end solvers in `tools.py` support retries and targeted fallbacks.
 
 ### LLM Query Planner (gravity, unit, numeral & cipher)
@@ -432,9 +433,8 @@ which dispatches to the selected backend.
 
 - In **classify**, gravity, unit conversion, numeral conversion, and cipher
   decryption use the LLM-based `QueryPlanner` to build DAGs; other types use
-  deterministic DAG templates.  Deterministic solvers in `tools.py` are used when `decompose`
-  emits them or for targeted fallbacks (e.g. failed `solve_equation_transform`
-  node).
+  the `QueryPlanner`.  Deterministic solvers in `tools.py` are used as primary
+  paths or fallbacks.
 
 ## Setup
 

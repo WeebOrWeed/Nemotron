@@ -827,10 +827,64 @@ def _build_cipher_dag(
     return dag
 
 
+# ═══════════════════════════════════════════════════════════════════
+#  BIT MANIPULATION planner
+# ═══════════════════════════════════════════════════════════════════
+
+def _build_bit_dag(
+    edges: list[tuple[str, str]],
+    nodes_dict: dict[str, dict],
+    prompt: str,
+) -> list[ThoughtNode]:
+    """Build a single-node deterministic DAG for bit manipulation.
+
+    solve_bit_manipulation handles everything: regex-extract binary pairs
+    and target, brute-force per-bit boolean function search, apply to target.
+    """
+    import json as _json
+    return [
+        ThoughtNode(
+            id="solve_bits",
+            question="Brute-force bit manipulation rule and apply to target.",
+            depends_on=[],
+            tool="solve_bit_manipulation",
+            tool_input=_json.dumps({"prompt": prompt}),
+            answer=None,
+        ),
+    ]
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  EQUATION TRANSFORM planner
+# ═══════════════════════════════════════════════════════════════════
+
+def _build_equation_dag(
+    edges: list[tuple[str, str]],
+    nodes_dict: dict[str, dict],
+    prompt: str,
+) -> list[ThoughtNode]:
+    """Build a single-node deterministic DAG for equation transformation.
+
+    solve_equation_transform handles everything: parse examples and target,
+    try numeric/symbolic/ordinal strategies per operator group.
+    """
+    import json as _json
+    return [
+        ThoughtNode(
+            id="solve_equation",
+            question="Solve equation transformation deterministically.",
+            depends_on=[],
+            tool="solve_equation_transform",
+            tool_input=_json.dumps({"prompt": prompt}),
+            answer=None,
+        ),
+    ]
+
+
 # ── QueryPlanner class ──────────────────────────────────────────────
 
 class QueryPlanner:
-    """LLM-based query planner for gravity, unit, numeral, and cipher puzzles.
+    """LLM-based query planner for all puzzle types.
 
     Calls the LLM to generate a mermaid-style execution plan (topology)
     plus a ThoughtNode dict, then combines them into ThoughtNodes.
@@ -888,6 +942,18 @@ class QueryPlanner:
             )
         except (ValueError, KeyError):
             return _build_cipher_dag([], {}, prompt)
+
+    # ── bit manipulation ─────────────────────────────────────────
+
+    def plan_bit(self, prompt: str) -> list[ThoughtNode]:
+        """Plan a bit manipulation puzzle — fully deterministic."""
+        return _build_bit_dag([], {}, prompt)
+
+    # ── equation transform ─────────────────────────────────────────
+
+    def plan_equation(self, prompt: str) -> list[ThoughtNode]:
+        """Plan an equation transformation puzzle — fully deterministic."""
+        return _build_equation_dag([], {}, prompt)
 
     # ── shared LLM call ───────────────────────────────────────────
 
