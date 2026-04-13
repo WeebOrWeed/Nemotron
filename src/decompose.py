@@ -23,29 +23,26 @@ Each node: {"id": "...", "question": "...", "depends_on": [...], "tool": "...", 
 - ask_llm nodes: question field is sent to the LLM. Include full context.
 - tool nodes: question field is a short description; tool_input does the work.
 
-TOOLS: ask_llm, eval_math, apply_formula, round_number, average, divide_sum_n_json, gravity_geom_mean_chain_exprs, regex_extract,
+TOOLS: ask_llm, eval_math, apply_formula, round_number, average, regex_extract,
 xor_binary, and_binary, or_binary, not_binary, shift_left, shift_right,
 rotate_left, rotate_right, substitute_chars, build_char_map, to_roman,
-from_roman, linear_factor, compute_gravity_g, compute_gravity_d.
+from_roman, extract_gravity_obs, compute_gravity_g, compute_gravity_d,
+extract_unit_pairs, geometric_mean_factor, apply_factor_round.
 
 === EXAMPLE FOR gravity_physics ===
 Prompt: "...For t = 1.37s, distance = 14.92 m\\nFor t = 4.27s, distance = 144.96 m...determine the falling distance for t = 4.41s..."
 [
-  {"id": "extract_spec", "question": "Extract JSON: {\\\"pairs\\\": [[t,d],...], \\\"gravitation_function\\\": \\\"d = 0.5*g*t^2\\\", \\\"query_t\\\": number}", "depends_on": [], "tool": "ask_llm", "tool_input": null},
-  {"id": "fill_equations", "question": "From:\\n{extract_spec}\\n\\nOne equation per pair, numbers substituted (e.g. 14.92 = 0.5*g*(1.37)^2).", "depends_on": ["extract_spec"], "tool": "ask_llm", "tool_input": null},
-  {"id": "expand_products", "question": "Expand t^2 to t*t only; no parens; no numeric multiply: d = 0.5*g*t*t per line:\\n{fill_equations}", "depends_on": ["fill_equations"], "tool": "ask_llm", "tool_input": null},
-  {"id": "g_unevaluated", "question": "g = d/0.5/t/t chains, unevaluated, no parens:\\n{expand_products}", "depends_on": ["expand_products"], "tool": "ask_llm", "tool_input": null},
-  {"id": "d_per_pair_symbolic", "question": "Spec:\\n{extract_spec}\\n\\n{g_unevaluated}\\n\\nSymbolic d_i at query_t per pair; no decimals.", "depends_on": ["g_unevaluated", "extract_spec"], "tool": "ask_llm", "tool_input": null},
-  {"id": "d_i_representations", "question": "Echo same count of d_k lines as above, * / and decimals only, no g:\\n{d_per_pair_symbolic}", "depends_on": ["d_per_pair_symbolic"], "tool": "ask_llm", "tool_input": null},
-  {"id": "eval_geom_mean_d", "question": "geometric mean (product then n-th root) via tool", "depends_on": ["d_i_representations"], "tool": "gravity_geom_mean_chain_exprs", "tool_input": "{d_i_representations}"}
+  {"id": "extract_obs", "question": "Extract (t, d) pairs and target_t from prompt.", "depends_on": [], "tool": "extract_gravity_obs", "tool_input": "{\"prompt\": \"<full prompt>\"}"},
+  {"id": "compute_g", "question": "Compute g via weighted least squares.", "depends_on": ["extract_obs"], "tool": "compute_gravity_g", "tool_input": "{extract_obs}"},
+  {"id": "predict_d", "question": "Compute d = 0.5 * g * t^2.", "depends_on": ["compute_g", "extract_obs"], "tool": "compute_gravity_d", "tool_input": "{\"g\": \"{compute_g}\", \"t\": \"{extract_obs_target_t}\"}"}
 ]
 
 === EXAMPLE FOR unit_conversion ===
-Prompt: "...3.2 m becomes 10.5 ft\\n5.1 m becomes 16.77 ft...convert measurement: 2.0 m"
+Prompt: "...3.2 m becomes 10.5\\n5.1 m becomes 16.77...convert measurement: 2.0 m"
 [
-  {"id": "extract_pairs", "question": "Extract ALL example conversions as [from, to] number pairs and the target value to convert. Output ONLY JSON: {\\\"pairs\\\": [[from1,to1],...], \\\"target\\\": <number>}", "depends_on": [], "tool": "ask_llm", "tool_input": null},
-  {"id": "compute_factor", "question": "Given:\\n{extract_pairs}\\n\\nFor each pair compute factor = to/from, then average. Output ONLY the average factor on the last line.", "depends_on": ["extract_pairs"], "tool": "ask_llm", "tool_input": null},
-  {"id": "apply_convert", "question": "factor = {compute_factor}\\nContext: {extract_pairs}\\n\\nCompute factor * target from JSON. Match example precision. Output ONLY the number.", "depends_on": ["compute_factor", "extract_pairs"], "tool": "ask_llm", "tool_input": null}
+  {"id": "extract_pairs", "question": "Extract pairs and target from prompt.", "depends_on": [], "tool": "extract_unit_pairs", "tool_input": "{\"prompt\": \"<full prompt>\"}"},
+  {"id": "compute_factor", "question": "Geometric mean of y/x ratios.", "depends_on": ["extract_pairs"], "tool": "geometric_mean_factor", "tool_input": "{extract_pairs}"},
+  {"id": "predict", "question": "Factor * target, rounded.", "depends_on": ["compute_factor", "extract_pairs"], "tool": "apply_factor_round", "tool_input": "{\"factor\": \"{compute_factor}\", \"target\": \"{extract_pairs_target}\"}"}
 ]
 
 === EXAMPLE FOR numeral_conversion ===

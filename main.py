@@ -1,6 +1,7 @@
 import argparse
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 
@@ -33,23 +34,64 @@ def _answers_match(answer, expected) -> bool:
         return False
 
 
-def _print_dag_trace(output: dict) -> None:
+
+BATCH_SIZE = 20
+
+
+def _run_single(graph, row_id, prompt, expected, has_expected, verbose, idx, total):
+    """Run a single puzzle through the graph. Returns (idx, entry, log_lines)."""
+    lines = []
+    t0 = time.time()
+    try:
+        output = graph.invoke({
+            "prompt": prompt,
+            "answer": None,
+            "puzzle_type": None,
+            "thought_dag": None,
+            "retries": 0,
+            "failure_log": [],
+        })
+        answer = output.get("answer") or ""
+    except Exception as exc:
+        answer = ""
+        output = {}
+        lines.append(f"[{idx}/{total}] id={row_id} ... ERROR: {exc}")
+
+    elapsed = time.time() - t0
+    match = _answers_match(answer, expected) if has_expected else None
+    status = f"{'MATCH' if match else 'MISS'} " if match is not None else ""
+    lines.append(f"[{idx}/{total}] id={row_id} ... {status}done ({elapsed:.1f}s)")
+    if match is False:
+        lines.append(f"    expected: {expected}  |  actual: {answer}")
+    if verbose and output:
+        lines.extend(_format_dag_trace(output))
+
+    entry = {"id": row_id, "answer": answer}
+    if has_expected:
+        entry["expected"] = expected
+    return idx, entry, lines
+
+
+def _format_dag_trace(output: dict) -> list[str]:
+    """Format DAG trace as a list of strings (for deferred printing)."""
+    lines = []
     dag = output.get("thought_dag") or []
     puzzle_type = output.get("puzzle_type", "unknown")
     retries = output.get("retries", 0)
     failure_log = output.get("failure_log") or []
 
-    print(f"    type={puzzle_type}  nodes={len(dag)}  retries={retries}")
+    lines.append(f"    type={puzzle_type}  nodes={len(dag)}  retries={retries}")
     for node in dag:
         status = "OK" if node["answer"] is not None else "UNSOLVED"
         answer_preview = (node["answer"] or "")[:60].encode("ascii", "replace").decode()
         deps = ",".join(node["depends_on"]) if node["depends_on"] else "(root)"
         executor = f"tool:{node['tool']}" if node.get("tool") else "llm"
-        print(f"    [{status}] {node['id']} ({executor}) deps={deps} -> {answer_preview}")
+        lines.append(f"    [{status}] {node['id']} ({executor}) deps={deps} -> {answer_preview}")
     if failure_log:
-        print(f"    failures: {len(failure_log)}")
+        lines.append(f"    failures: {len(failure_log)}")
         for f in failure_log:
-            print(f"      - {f['node_id']}: {f['error'][:80]}")
+            lines.append(f"      - {f['node_id']}: {f['error'][:80]}")
+    return lines
 
 
 def run(
@@ -58,6 +100,7 @@ def run(
     limit: int | None = None,
     verbose: bool = False,
     types: list[str] | None = None,
+    batch_size: int = BATCH_SIZE,
 ) -> None:
     df = pd.read_csv(dataset_path)
     if types:
@@ -77,51 +120,39 @@ def run(
     )
     provider = llm._resolve_provider()
 
-    print(f"Loaded {len(df)} rows from {dataset_path}")
+    total = len(df)
+    print(f"Loaded {total} rows from {dataset_path}")
     print(f"Provider: {provider}  |  Model: {MODEL_NAME if provider == 'ollama' else DEEPSEEK_MODEL}")
+    print(f"Batch size: {batch_size}")
 
     graph = build_graph(llm)
-
     has_expected = "answer" in df.columns
 
-    results = []
-    for idx, row in df.iterrows():
-        row_id = row["id"]
-        prompt = row["prompt"]
-        expected = row["answer"] if has_expected else None
+    results = [None] * total
+    for batch_start in range(0, total, batch_size):
+        batch_end = min(batch_start + batch_size, total)
+        batch = df.iloc[batch_start:batch_end]
+        batch_t0 = time.time()
 
-        print(f"[{idx + 1}/{len(df)}] id={row_id} ...", end=" ", flush=True)
-        t0 = time.time()
+        with ThreadPoolExecutor(max_workers=len(batch)) as pool:
+            futures = {}
+            for i, (_, row) in enumerate(batch.iterrows()):
+                idx = batch_start + i + 1
+                expected = row["answer"] if has_expected else None
+                fut = pool.submit(
+                    _run_single, graph, row["id"], row["prompt"],
+                    expected, has_expected, verbose, idx, total,
+                )
+                futures[fut] = idx
 
-        try:
-            output = graph.invoke({
-                "prompt": prompt,
-                "answer": None,
-                "puzzle_type": None,
-                "thought_dag": None,
-                "retries": 0,
-                "failure_log": [],
-            })
-            answer = output.get("answer") or ""
-        except Exception as exc:
-            print(f"ERROR: {exc}")
-            answer = ""
-            output = {}
+            for fut in as_completed(futures):
+                idx, entry, lines = fut.result()
+                results[idx - 1] = entry
+                for line in lines:
+                    print(line)
 
-        elapsed = time.time() - t0
-        match = _answers_match(answer, expected) if has_expected else None
-        status = f"{'MATCH' if match else 'MISS'} " if match is not None else ""
-        print(f"{status}done ({elapsed:.1f}s)")
-        if match is False:
-            print(f"    expected: {expected}  |  actual: {answer}")
-
-        if verbose and output:
-            _print_dag_trace(output)
-
-        entry = {"id": row_id, "answer": answer}
-        if has_expected:
-            entry["expected"] = expected
-        results.append(entry)
+        batch_elapsed = time.time() - batch_t0
+        print(f"  batch {batch_start + 1}-{batch_end}/{total} done ({batch_elapsed:.1f}s)")
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     results_df = pd.DataFrame(results)
@@ -164,8 +195,14 @@ def main() -> None:
         default=None,
         help="Comma-separated puzzle types to run (e.g. gravity_physics,cipher_decryption)",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=BATCH_SIZE,
+        help=f"Number of puzzles to run in parallel per batch (default: {BATCH_SIZE})",
+    )
     args = parser.parse_args()
-    run(args.dataset, args.output, args.limit, args.verbose, args.types)
+    run(args.dataset, args.output, args.limit, args.verbose, args.types, args.batch_size)
 
 
 if __name__ == "__main__":

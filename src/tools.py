@@ -496,106 +496,12 @@ def _to_float_pairs(pairs) -> list[list[float]]:
     return result
 
 
-def linear_factor(tool_input: str) -> str:
-    """Compute average linear conversion factor from (input, output) pairs.
-    Input: {"pairs": [[10.08, 6.69], [17.83, 11.83], [35.85, 23.79]]}
+def extract_gravity_obs(tool_input: str) -> str:
+    """Extract (t, d) observation pairs and target_t from a gravity prompt.
+
+    Input:  {"prompt": "..."}
+    Output: {"observations": [[t1, d1], ...], "target_t": <float>}
     """
-    data = json.loads(tool_input)
-    pairs = _to_float_pairs(data["pairs"])
-    factors = [y / x for x, y in pairs if x != 0]
-    if not factors:
-        raise ValueError("All x-values are zero")
-    avg = sum(factors) / len(factors)
-    return _fmt_number(avg)
-
-
-def linear_fit(tool_input: str) -> str:
-    """Least-squares linear regression on (x, y) pairs.
-
-    Returns JSON {"slope": a, "intercept": b} for best-fit y = a*x + b.
-    Works for both multiplicative (b≈0) and affine (F→C-style) conversions.
-
-    Accepts either:
-      {"pairs": [[x1,y1], ...]}
-    or the full extract_pairs JSON:
-      {"pairs": [[x1,y1], ...], "target": ...}
-    """
-    data = json.loads(tool_input)
-    pairs = _to_float_pairs(data["pairs"])
-    n = len(pairs)
-    if n < 1:
-        raise ValueError("Need at least one pair for linear_fit")
-    if n == 1:
-        x0, y0 = pairs[0]
-        if x0 == 0:
-            return json.dumps({"slope": 0.0, "intercept": y0})
-        return json.dumps({"slope": y0 / x0, "intercept": 0.0})
-
-    sx = sum(x for x, _ in pairs)
-    sy = sum(y for _, y in pairs)
-    sxy = sum(x * y for x, y in pairs)
-    sx2 = sum(x * x for x, _ in pairs)
-    denom = n * sx2 - sx * sx
-    if abs(denom) < 1e-15:
-        raise ValueError("Degenerate data: all x-values are identical")
-    a = (n * sxy - sx * sy) / denom
-    b = (sy - a * sx) / n
-    return json.dumps({"slope": a, "intercept": b})
-
-
-def compute_gravity_g(tool_input: str) -> str:
-    """Compute g from (t, d) observation pairs using g = 2d/t^2. Returns average g.
-    Input: {"observations": [[1.37, 14.92], [4.27, 144.96], [3.28, 85.54]]}
-    Each pair is [t_seconds, d_meters].
-    """
-    data = json.loads(tool_input)
-    obs = _to_float_pairs(data["observations"])
-    g_values = [2 * d / (t ** 2) for t, d in obs if t != 0]
-    if not g_values:
-        raise ValueError("No valid observations")
-    avg_g = sum(g_values) / len(g_values)
-    return _fmt_number(avg_g)
-
-
-def compute_gravity_d(tool_input: str) -> str:
-    """Compute falling distance d = 0.5 * g * t^2, rounded to 2 decimal places.
-    Input: {"g": 15.89, "t": 4.41}
-    """
-    data = json.loads(tool_input)
-    g = float(data["g"])
-    t = float(data["t"])
-    d = 0.5 * g * t ** 2
-    return f"{d:.2f}"
-
-
-# ===================================================================
-# End-to-end solvers (parse prompt with regex, compute, return answer)
-# ===================================================================
-
-def _vote_predict(per_obs_values: list[float], target_mult: float,
-                   intervals: list[tuple[float, float]]) -> str:
-    """Majority-vote prediction: each observation's parameter independently
-    predicts the result; the most common rounded answer wins.
-
-    Tiebreaker: interval midpoint, then simple average.
-    """
-    from collections import Counter
-    predictions = [f"{v * target_mult:.2f}" for v in per_obs_values]
-    counts = Counter(predictions)
-    top = counts.most_common(2)
-    if len(top) == 1 or top[0][1] > top[1][1]:
-        return top[0][0]
-    lo = max(a for a, _ in intervals)
-    hi = min(b for _, b in intervals)
-    if lo <= hi:
-        mid = (lo + hi) / 2
-        return f"{mid * target_mult:.2f}"
-    avg = sum(per_obs_values) / len(per_obs_values)
-    return f"{avg * target_mult:.2f}"
-
-
-def solve_gravity_physics(tool_input: str) -> str:
-    """Solve a gravity puzzle via per-observation majority vote on g."""
     data = json.loads(tool_input)
     prompt = data["prompt"]
     obs_matches = re.findall(
@@ -608,41 +514,102 @@ def solve_gravity_physics(tool_input: str) -> str:
     if not target_match:
         target_match = re.search(r'for\s+t\s*=\s*([\d.]+)', prompt, re.IGNORECASE)
     target_t = float(target_match.group(1))
-
-    g_values = []
-    g_intervals = []
-    for t, d in observations:
-        if t == 0:
-            continue
-        g = 2 * d / (t ** 2)
-        g_values.append(g)
-        half_t2 = 0.5 * t * t
-        g_intervals.append(((d - 0.005) / half_t2, (d + 0.005) / half_t2))
-
-    target_mult = 0.5 * target_t ** 2
-    return _vote_predict(g_values, target_mult, g_intervals)
+    return json.dumps({"observations": observations, "target_t": target_t})
 
 
-def solve_unit_conversion(tool_input: str) -> str:
-    """Solve a unit conversion puzzle via per-observation majority vote on factor."""
+def compute_gravity_g(tool_input: str) -> str:
+    """Compute g from (t, d) pairs via weighted least squares.
+
+    Minimises sum((d_i - 0.5*g*t_i^2)^2), yielding
+    g = sum(d_i * t_i^2) / sum(0.5 * t_i^4).  Observations with
+    larger t naturally get more weight (less rounding noise in g).
+
+    Input: {"observations": [[t1, d1], ...]}  (also accepts extra keys)
+    Output: g as a decimal string.
+    """
+    data = json.loads(tool_input)
+    obs = _to_float_pairs(data["observations"])
+    num = sum(d * t**2 for t, d in obs if t != 0)
+    den = sum(0.5 * t**4 for t, d in obs if t != 0)
+    if den == 0:
+        raise ValueError("No valid observations")
+    g = num / den
+    return _fmt_number(g)
+
+
+def compute_gravity_d(tool_input: str) -> str:
+    """Compute falling distance d = 0.5 * g * t^2 with ceil/floor rounding.
+
+    Input: {"g": "15.89", "t": "4.41"}
+    Output: d rounded to 2 decimal places.
+    """
+    data = json.loads(tool_input)
+    g = float(data["g"])
+    t = float(data["t"])
+    d = 0.5 * g * t ** 2
+    return _round_half_up_2dp(d)
+
+
+# ===================================================================
+# End-to-end solvers (parse prompt with regex, compute, return answer)
+# ===================================================================
+
+
+def _round_half_up_2dp(value: float) -> str:
+    """Round to 2 decimal places: ceil if fractional >= 0.005, floor otherwise."""
+    import math
+    shifted = value * 100
+    frac = shifted - math.floor(shifted)
+    if frac >= 0.5 - 1e-9:
+        return f"{math.ceil(shifted - 1e-9) / 100:.2f}"
+    return f"{math.floor(shifted + 1e-9) / 100:.2f}"
+
+
+def extract_unit_pairs(tool_input: str) -> str:
+    """Extract (from, to) pairs and target from a unit conversion prompt.
+
+    Input:  {"prompt": "..."}
+    Output: {"pairs": [[x1, y1], ...], "target": <float>}
+    """
     data = json.loads(tool_input)
     prompt = data["prompt"]
     pairs = re.findall(r'([\d.]+)\s*m?\s*becomes\s*([\d.]+)', prompt)
     float_pairs = [[float(x), float(y)] for x, y in pairs]
-
-    f_values = []
-    f_intervals = []
-    for x, y in float_pairs:
-        if x == 0:
-            continue
-        f_values.append(y / x)
-        f_intervals.append(((y - 0.005) / x, (y + 0.005) / x))
-
     target_match = re.search(
         r'convert.*?(?:measurement)?[:\s]+([\d.]+)\s*m', prompt, re.IGNORECASE
     )
     target = float(target_match.group(1))
-    return _vote_predict(f_values, target, f_intervals)
+    return json.dumps({"pairs": float_pairs, "target": target})
+
+
+def geometric_mean_factor(tool_input: str) -> str:
+    """Compute geometric mean of y/x ratios from (x, y) pairs.
+
+    Input: {"pairs": [[x1, y1], ...]}  (also accepts extra keys)
+    Output: the factor as a decimal string.
+    """
+    import math
+    data = json.loads(tool_input)
+    pairs = _to_float_pairs(data["pairs"])
+    factors = [y / x for x, y in pairs if x != 0]
+    if not factors:
+        raise ValueError("All x-values are zero")
+    n = len(factors)
+    geo_mean = math.prod(factors) ** (1 / n)
+    return _fmt_number(geo_mean)
+
+
+def apply_factor_round(tool_input: str) -> str:
+    """Multiply factor by target and round to 2dp (ceil/floor at 0.005).
+
+    Input: {"factor": "0.715734", "target": "22.66"}
+    Output: rounded result string.
+    """
+    data = json.loads(tool_input)
+    factor = float(data["factor"])
+    target = float(data["target"])
+    raw = factor * target
+    return _round_half_up_2dp(raw)
 
 
 def solve_numeral_conversion(tool_input: str) -> str:
@@ -765,6 +732,135 @@ def solve_cipher_decryption(tool_input: str) -> str:
             return best_result
 
     return "".join(mapping.get(ch, ch) for ch in target)
+
+
+def _try_byte_ops(
+    inputs: list[int], outputs: list[int], target: int,
+) -> int | None:
+    """Try whole-byte transforms: singles then pairs of composed ops.
+
+    Covers rotations, shifts, XOR/AND/OR/ADD with constant, NOT,
+    bit-reverse, and nibble-swap.  ~540 atomic ops; pairs ≈ 540² × N
+    checks — runs in < 1 s for typical N ≤ 10.
+    """
+    BITS = 8
+    MASK = 0xFF
+
+    def _rot_l(x: int, n: int) -> int:
+        return ((x << n) | (x >> (BITS - n))) & MASK
+
+    def _rev(x: int) -> int:
+        r = 0
+        for _ in range(BITS):
+            r = (r << 1) | (x & 1)
+            x >>= 1
+        return r
+
+    ops: list = []
+    for n in range(1, BITS):
+        ops.append(lambda x, n=n: _rot_l(x, n))
+    for n in range(1, BITS):
+        ops.append(lambda x, n=n: (x << n) & MASK)
+        ops.append(lambda x, n=n: x >> n)
+    for c in range(256):
+        ops.append(lambda x, c=c: x ^ c)
+        ops.append(lambda x, c=c: (x + c) & MASK)
+    ops.append(lambda x: (~x) & MASK)
+    ops.append(_rev)
+    ops.append(lambda x: ((x & 0xF) << 4) | (x >> 4))
+    ops.append(lambda x: x)
+
+    n_ex = len(inputs)
+
+    for op in ops:
+        ok = True
+        for k in range(n_ex):
+            if op(inputs[k]) != outputs[k]:
+                ok = False
+                break
+        if ok:
+            return op(target)
+
+    for op1 in ops:
+        mids = [op1(inputs[k]) for k in range(n_ex)]
+        t_mid = op1(target)
+        for op2 in ops:
+            ok = True
+            for k in range(n_ex):
+                if op2(mids[k]) != outputs[k]:
+                    ok = False
+                    break
+            if ok:
+                return op2(t_mid)
+
+    return None
+
+
+def _try_gf2_linear(
+    inputs: list[int], outputs: list[int], target: int,
+) -> int | None:
+    """Find a GF(2)-affine mapping: each output bit = XOR of some input bits + const.
+
+    Solves an overdetermined system (10 equations, 9 unknowns per bit)
+    via Gaussian elimination over GF(2).  Covers any composition of
+    rotations, permutations, and XOR — much more constrained than
+    per-bit brute force, so far fewer false positives.
+    """
+    BITS = 8
+    n = len(inputs)
+    solutions: list[list[int]] = []
+
+    for j in range(BITS):
+        cols = BITS + 1  # 8 input-bit weights + 1 constant
+        mat = []
+        for k in range(n):
+            row = [(inputs[k] >> i) & 1 for i in range(BITS)]
+            row.append(1)  # constant term
+            row.append((outputs[k] >> j) & 1)  # RHS
+            mat.append(row)
+
+        pr = 0
+        pcm: dict[int, int] = {}
+        for c in range(cols):
+            piv = -1
+            for r in range(pr, n):
+                if mat[r][c]:
+                    piv = r
+                    break
+            if piv < 0:
+                continue
+            mat[pr], mat[piv] = mat[piv], mat[pr]
+            for r in range(n):
+                if r != pr and mat[r][c]:
+                    for x in range(cols + 1):
+                        mat[r][x] ^= mat[pr][x]
+            pcm[c] = pr
+            pr += 1
+
+        for r in range(pr, n):
+            if mat[r][cols]:
+                return None  # inconsistent — not GF(2)-linear
+
+        sol = [0] * cols
+        for c, r in pcm.items():
+            sol[c] = mat[r][cols]
+        solutions.append(sol)
+
+    def _apply(x: int) -> int:
+        res = 0
+        for j in range(BITS):
+            s = solutions[j]
+            bit = s[BITS]
+            for i in range(BITS):
+                bit ^= s[i] & ((x >> i) & 1)
+            res |= (bit & 1) << j
+        return res
+
+    for k in range(n):
+        if _apply(inputs[k]) != outputs[k]:
+            return None
+
+    return _apply(target)
 
 
 def _choice(a: int, b: int, c: int) -> int:
@@ -962,7 +1058,11 @@ def solve_bit_manipulation(tool_input: str) -> str:
     if not target_match:
         target_match = re.search(r'for:?\s*([01]{8})', prompt, re.IGNORECASE)
     target = int(target_match.group(1), 2)
-    result = _brute_force_bit_rule(inputs, outputs, target)
+    result = _try_byte_ops(inputs, outputs, target)
+    if result is None:
+        result = _try_gf2_linear(inputs, outputs, target)
+    if result is None:
+        result = _brute_force_bit_rule(inputs, outputs, target)
     if result is not None:
         return format(result, '08b')
     raise ValueError("Could not find consistent bit manipulation rule")
@@ -1267,94 +1367,6 @@ def solve_equation_transform(tool_input: str) -> str:
     raise ValueError("No programmatic pattern found for equation_transform")
 
 
-def divide_sum_n_json(tool_input: str) -> str:
-    """Parse JSON from the gravity ``sum_and_count`` LLM step.
-
-    If ``d_values`` is present, mean = sum(d_values)/len(d_values) in float
-    (ignores a wrong ``sum`` field). Otherwise uses ``sum`` and ``n``.
-    Returns the mean formatted to 2 decimal places.
-
-    ``tool_input`` is the raw prior-node answer (may include markdown fences).
-    """
-    text = tool_input.strip()
-    for fence in ("```json", "```"):
-        text = text.replace(fence, "")
-    text = text.strip()
-    start = text.find("{")
-    if start < 0:
-        raise ValueError("divide_sum_n_json: no JSON object found")
-    obj, _ = json.JSONDecoder().raw_decode(text[start:])
-    if "d_values" in obj:
-        vals = [float(x) for x in obj["d_values"]]
-        if not vals:
-            raise ValueError("divide_sum_n_json: empty d_values")
-        return f"{sum(vals) / len(vals):.2f}"
-    if "sum" not in obj or "n" not in obj:
-        raise ValueError("divide_sum_n_json: need d_values or sum+n")
-    total = float(obj["sum"])
-    n = int(obj["n"])
-    if n <= 0:
-        raise ValueError("divide_sum_n_json: n must be positive")
-    return f"{total / n:.2f}"
-
-
-def _eval_mul_div_chain(expr: str) -> float:
-    """Evaluate a flat chain of * and / with decimal literals, left-to-right."""
-    s = re.sub(r"\s+", "", expr.strip())
-    if not s:
-        raise ValueError("empty expression")
-    tokens = re.findall(r"[\d.]+|[*/]", s)
-    if not tokens or tokens[0] in "*/":
-        raise ValueError(f"bad chain start: {expr!r}")
-    acc = float(tokens[0])
-    i = 1
-    while i < len(tokens):
-        op = tokens[i]
-        if i + 1 >= len(tokens):
-            raise ValueError(f"trailing operator in {expr!r}")
-        nxt = float(tokens[i + 1])
-        if op == "*":
-            acc *= nxt
-        elif op == "/":
-            acc /= nxt
-        else:
-            raise ValueError(f"unexpected token {op!r} in {expr!r}")
-        i += 2
-    return acc
-
-
-def gravity_geom_mean_chain_exprs(tool_input: str) -> str:
-    """Parse ``d_k = <mul/div chain>`` lines; **geometric** mean in Python, 2dp.
-
-    Computes ``(d_1 * d_2 * ... * d_n) ** (1/n)`` via ``exp(mean(log v)))``
-    for stability. Each RHS uses only ``*``, ``/``, and decimals (no parens).
-    """
-    text = tool_input.strip()
-    for fence in ("```json", "```"):
-        text = text.replace(fence, "")
-    text = text.strip()
-    vals: list[float] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        m = re.match(r"d_\d+\s*=\s*(.+)", line, re.I)
-        if not m:
-            continue
-        vals.append(_eval_mul_div_chain(m.group(1)))
-    if not vals:
-        raise ValueError(
-            "gravity_geom_mean_chain_exprs: no lines matching 'd_k = <expr>' found"
-        )
-    if any(v <= 0 for v in vals):
-        raise ValueError(
-            "gravity_geom_mean_chain_exprs: all d_k values must be positive"
-        )
-    n = len(vals)
-    geom = math.exp(sum(math.log(v) for v in vals) / n)
-    return f"{geom:.2f}"
-
-
 # ===================================================================
 # Registry
 # ===================================================================
@@ -1386,16 +1398,15 @@ TOOL_REGISTRY: dict[str, callable] = {
     "from_roman": from_roman,
     "detect_numeral_system": detect_numeral_system,
     "convert_numeral": convert_numeral,
-    # Unit conversion / gravity
-    "linear_factor": linear_factor,
-    "linear_fit": linear_fit,
+    # Gravity physics (composable)
+    "extract_gravity_obs": extract_gravity_obs,
     "compute_gravity_g": compute_gravity_g,
     "compute_gravity_d": compute_gravity_d,
-    "divide_sum_n_json": divide_sum_n_json,
-    "gravity_geom_mean_chain_exprs": gravity_geom_mean_chain_exprs,
-    # End-to-end solvers
-    "solve_gravity_physics": solve_gravity_physics,
-    "solve_unit_conversion": solve_unit_conversion,
+    # Unit conversion (composable)
+    "extract_unit_pairs": extract_unit_pairs,
+    "geometric_mean_factor": geometric_mean_factor,
+    "apply_factor_round": apply_factor_round,
+    # End-to-end solvers (other types)
     "solve_numeral_conversion": solve_numeral_conversion,
     "solve_cipher_decryption": solve_cipher_decryption,
     "solve_bit_manipulation": solve_bit_manipulation,
@@ -1437,12 +1448,6 @@ GENERAL:
 
 - average: Compute the mean of a list of numbers.
   Input: {"values": [15.88, 15.92, 15.87]}
-
-- divide_sum_n_json: Mean from JSON {"d_values": [...]} or {"sum", "n"}.
-
-- gravity_geom_mean_chain_exprs: Geometric mean of d_i from ``d_k = a*b/c/...`` lines
-  (product of all d_k, then n-th root; ``exp(mean(log)))``), 2dp.
-  Input: raw LLM text with one chain per line, only * and / and decimals; all values > 0.
 
 - regex_extract: Extract all regex matches from text (returns JSON array).
   Input: {"text": "t = 1.37s, distance = 14.92 m", "pattern": "[\\\\d.]+"}
@@ -1488,19 +1493,23 @@ NUMERAL CONVERSION:
   Input: {"number": 42, "system": "base_2"}  ->  "101010"
   Input: {"number": 255, "system": "base_16"}  ->  "FF"
 
-UNIT CONVERSION / GRAVITY PHYSICS:
-- linear_factor: Compute average conversion factor from (input, output) pairs.
-  Input: {"pairs": [[10.08, 6.69], [17.83, 11.83]]}
+GRAVITY PHYSICS (composable, 3-node DAG):
+- extract_gravity_obs: Extract (t, d) observation pairs and target_t from prompt.
+  Input: {"prompt": "..."}  ->  {"observations": [[t1,d1],...], "target_t": 4.41}
 
-- linear_fit: Least-squares linear regression on (x, y) pairs.
-  Returns JSON {"slope": a, "intercept": b} for best-fit y = a*x + b.
-  Works for both multiplicative (b≈0) and affine (F→C-style) conversions.
-  Input: {"pairs": [[35.31, 32.49], [11.58, 10.65], ...]}
+- compute_gravity_g: Compute g via weighted least squares from observations.
+  Input: {"observations": [[1.37, 14.92], [4.27, 144.96]]}  ->  "15.89"
 
-- compute_gravity_g: Compute g from (t, d) observations using g = 2d/t².
-  Input: {"observations": [[1.37, 14.92], [4.27, 144.96]]}
-  Returns the average g value.
+- compute_gravity_d: Compute d = 0.5*g*t² with ceil/floor rounding to 2dp.
+  Input: {"g": "15.89", "t": "4.41"}  ->  "154.62"
 
-- compute_gravity_d: Compute distance d = 0.5*g*t², rounded to 2 decimals.
-  Input: {"g": 15.89, "t": 4.41}  ->  "154.62"\
+UNIT CONVERSION (composable, 3-node DAG):
+- extract_unit_pairs: Extract (from, to) pairs and target from prompt.
+  Input: {"prompt": "..."}  ->  {"pairs": [[10.08,6.69],...], "target": 25.09}
+
+- geometric_mean_factor: Geometric mean of y/x ratios from pairs.
+  Input: {"pairs": [[10.08, 6.69], [17.83, 11.83]]}  ->  "0.6636..."
+
+- apply_factor_round: Multiply factor by target, ceil/floor round to 2dp.
+  Input: {"factor": "0.6636", "target": "25.09"}  ->  "16.65"\
 """

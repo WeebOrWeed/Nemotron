@@ -19,7 +19,7 @@ def _interpolate_parents(template: str, dag: list[ThoughtNode]) -> str:
 
     Also supports JSON sub-field access: {node_id_field} will extract
     ``answer[field]`` when the answer is a JSON object.  For example,
-    {linear_fit_slope} extracts the "slope" key from linear_fit's answer.
+    {extract_obs_target_t} extracts the "target_t" key from extract_obs's answer.
     """
     answered = {n["id"]: (n["answer"] or "") for n in dag if n["answer"] is not None}
     for node_id, answer in answered.items():

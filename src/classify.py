@@ -26,25 +26,15 @@ PUZZLE_SIGNATURES: dict[str, str] = {
 def make_classify_node(llm: LLMClient):
     """Factory that returns the classify node function with the LLM client bound.
 
-    All puzzle types use the ``QueryPlanner``.
+    All puzzle types use ``QueryPlanner.plan(puzzle_type, prompt)``.
     """
     planner = QueryPlanner(llm)
 
-    plan_builders: dict[str, callable] = {
-        "gravity_physics": planner.plan_gravity,
-        "unit_conversion": planner.plan_unit,
-        "numeral_conversion": planner.plan_numeral,
-        "cipher_decryption": planner.plan_cipher,
-        "bit_manipulation": planner.plan_bit,
-        "equation_transform": planner.plan_equation,
-    }
-
     def classify_node(state: GraphState) -> dict:
-        """Classify the puzzle and emit a recommended execution plan.
+        """Classify the puzzle and produce an execution plan.
 
-        Returns ``puzzle_type`` and ``thought_dag``.  For known types the
-        DAG is built by a plan builder.  For unknown types the DAG is left
-        empty so decompose will generate one via the LLM.
+        Returns ``puzzle_type`` and ``thought_dag``.  The planner receives
+        the puzzle type as an intent parameter and generates the matching DAG.
         """
         prompt = state["prompt"]
         prompt_lower = prompt.lower()
@@ -55,8 +45,7 @@ def make_classify_node(llm: LLMClient):
                 puzzle_type = ptype
                 break
 
-        builder = plan_builders.get(puzzle_type)
-        dag = builder(prompt) if builder else None
+        dag = planner.plan(puzzle_type, prompt) if puzzle_type != "unknown" else None
 
         return {"puzzle_type": puzzle_type, "thought_dag": dag}
 

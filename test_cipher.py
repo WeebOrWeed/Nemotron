@@ -2,13 +2,14 @@
 import sys, time, json
 import pandas as pd
 from src.llm_client import LLMClient
-from src.planner import _build_cipher_dag
+from src.planner import QueryPlanner
 from src.solver import _interpolate_parents, _extract_final_answer
 from src.tools import run_tool
 
 sys.stdout.reconfigure(line_buffering=True)
 
 llm = LLMClient()
+planner = QueryPlanner(llm)
 SYSTEM = "You are a precise problem-solving assistant. Output ONLY your final answer on the last line with no extra text."
 
 def solve_node(node, dag, prompt):
@@ -40,7 +41,7 @@ row = df[df["id"] == "00189f6a"].iloc[0]
 print("ID:", row.id, flush=True)
 print("Expected:", row.answer, flush=True)
 
-dag = _build_cipher_dag([], {}, row.prompt)
+dag = planner.plan("cipher_decryption", row.prompt)
 print(f"DAG: {[n['id'] for n in dag]}", flush=True)
 
 while True:
