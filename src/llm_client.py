@@ -7,11 +7,13 @@ Ollama server is unreachable.
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+import requests
 import ollama
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 
 
 @dataclass
@@ -22,13 +24,17 @@ class LLMResponse:
 
 @dataclass
 class LLMClient:
-    """Thin wrapper that dispatches chat() to Ollama or DeepSeek."""
+    """Thin wrapper that dispatches chat() to Ollama, OpenRouter, or DeepSeek."""
 
     provider: str = "auto"
     model_name: str = "nemotron-3-nano:4b"
     ollama_base_url: str = "http://localhost:11434"
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-chat"
+    openrouter_api_key: str = ""
+    openrouter_model: str = "nvidia/nemotron-3-nano-30b-a3b:free"
+    hf_token: str = ""
+    hf_model: str = "nvidia/OpenMath-Nemotron-14B-Kaggle"
 
     _resolved_provider: Optional[str] = field(default=None, init=False, repr=False)
 
@@ -37,22 +43,24 @@ class LLMClient:
         if self._resolved_provider is not None:
             return self._resolved_provider
 
-        if self.provider in ("ollama", "deepseek"):
+        if self.provider in ("ollama", "openrouter", "deepseek", "huggingface"):
             self._resolved_provider = self.provider
             return self._resolved_provider
 
-        # auto: try ollama, fall back to deepseek
+        # auto: try ollama, fall back to openrouter, then deepseek
         try:
             c = ollama.Client(host=self.ollama_base_url)
             c.list()
             self._resolved_provider = "ollama"
         except Exception:
-            if self.deepseek_api_key:
+            if self.openrouter_api_key:
+                self._resolved_provider = "openrouter"
+            elif self.deepseek_api_key:
                 self._resolved_provider = "deepseek"
             else:
                 raise RuntimeError(
-                    "Ollama is unreachable and DEEPSEEK_API_KEY is not set. "
-                    "Start Ollama or set DEEPSEEK_API_KEY in .env."
+                    "Ollama is unreachable and neither OPENROUTER_API_KEY nor "
+                    "DEEPSEEK_API_KEY is set."
                 )
         return self._resolved_provider
 
@@ -69,6 +77,12 @@ class LLMClient:
         if provider == "ollama":
             return self._chat_ollama(messages, think=think, temperature=temperature,
                                      top_p=top_p, max_tokens=max_tokens)
+        if provider == "openrouter":
+            return self._chat_openrouter(messages, temperature=temperature,
+                                         top_p=top_p, max_tokens=max_tokens)
+        if provider == "huggingface":
+            return self._chat_huggingface(messages, temperature=temperature,
+                                          top_p=top_p, max_tokens=max_tokens)
         return self._chat_deepseek(messages, think=think, temperature=temperature,
                                    top_p=top_p, max_tokens=max_tokens)
 
@@ -86,6 +100,75 @@ class LLMClient:
             content=resp.message.content or "",
             thinking=getattr(resp.message, "thinking", None),
         )
+
+    # ── OpenRouter (OpenAI-compatible) ────────────────────────────────────
+
+    _OPENROUTER_RATE_LIMIT_DELAY = 60.0  # 429: wait a full minute before retry
+    _OPENROUTER_MAX_RETRIES = 2
+
+    def _chat_openrouter(self, messages, *, temperature, top_p, max_tokens) -> LLMResponse:
+        client = OpenAI(
+            api_key=self.openrouter_api_key,
+            base_url="https://openrouter.ai/api/v1",
+        )
+        last_exc: Exception | None = None
+        for attempt in range(self._OPENROUTER_MAX_RETRIES + 1):
+            try:
+                resp = client.chat.completions.create(
+                    model=self.openrouter_model,
+                    messages=messages,
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_tokens=max_tokens,
+                )
+                content = resp.choices[0].message.content or ""
+                return LLMResponse(content=content)
+            except RateLimitError as exc:
+                last_exc = exc
+                # Per-day limits won't recover within a retry window — raise immediately.
+                if "per-day" in str(exc).lower() or "per_day" in str(exc).lower():
+                    raise
+                if attempt < self._OPENROUTER_MAX_RETRIES:
+                    time.sleep(self._OPENROUTER_RATE_LIMIT_DELAY)
+                    continue
+        raise last_exc
+
+    # ── HuggingFace Inference (via featherless-ai router, OpenAI-compatible) ──
+
+    _HF_BASE_URL = "https://router.huggingface.co/featherless-ai/v1/chat/completions"
+    _HF_503_DELAY = 20.0
+    _HF_429_DELAY = 10.0
+    _HF_MAX_RETRIES = 3
+
+    def _chat_huggingface(self, messages, *, temperature, top_p, max_tokens) -> LLMResponse:
+        headers = {
+            "Authorization": f"Bearer {self.hf_token}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.hf_model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+        }
+        for attempt in range(self._HF_MAX_RETRIES + 1):
+            resp = requests.post(self._HF_BASE_URL, headers=headers, json=payload, timeout=120)
+            if resp.status_code == 503:
+                if attempt < self._HF_MAX_RETRIES:
+                    time.sleep(self._HF_503_DELAY)
+                    continue
+                resp.raise_for_status()
+            if resp.status_code == 429:
+                if attempt < self._HF_MAX_RETRIES:
+                    time.sleep(self._HF_429_DELAY)
+                    continue
+                resp.raise_for_status()
+            resp.raise_for_status()
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"] or ""
+            return LLMResponse(content=content)
+        raise RuntimeError("HuggingFace: max retries exceeded")
 
     # ── DeepSeek (OpenAI-compatible) ──────────────────────────────────────
 

@@ -7,6 +7,7 @@ from src.state import GraphState, ThoughtNode, FailureRecord
 from src.config import MAX_RETRIES
 from src.tools import run_tool
 from src.llm_client import LLMClient
+from src.classify import classify_equation_subtype
 
 SYSTEM_PROMPT = (
     "You are a precise problem-solving assistant. "
@@ -55,6 +56,9 @@ def _solve_single_node(
         return _run_tool_node(tool_name, node, dag)
     except Exception:
         if tool_name == "solve_equation_transform":
+            subtype = classify_equation_subtype(original_prompt)
+            if subtype in ("cryptarithm_deduce", "cryptarithm_guess"):
+                raise ValueError(f"cryptarithm puzzle ({subtype}): skipping LLM fallback")
             return _eq_transform_llm_fallback(llm, node, dag, original_prompt)
         return _run_llm_node(llm, node, dag, original_prompt)
 
@@ -86,7 +90,10 @@ def _run_llm_node(
     n_votes = int(node.get("tool_input") or "1") if node.get("tool") == "majority_vote_llm" else 1
 
     if n_votes > 1:
-        return _majority_vote(llm, full_question, n_votes)
+        result = _majority_vote(llm, full_question, n_votes)
+        if result is None:
+            raise ValueError("majority vote timed out or returned no answers")
+        return result
 
     resp = llm.chat(
         [
@@ -119,29 +126,40 @@ def _eq_transform_llm_fallback(
         f"Original puzzle:\n{original_prompt}\n\n"
         f"Your task:\n{question}"
     )
-    return _majority_vote(llm, full_question, 5)
+    result = _majority_vote(llm, full_question, 5)
+    if result is None:
+        raise ValueError("equation_transform majority vote timed out")
+    return result
 
 
 def _majority_vote(
     llm: LLMClient,
     full_question: str,
     n_votes: int,
-) -> str:
-    """Make multiple LLM calls with varying temperatures and return the most common answer."""
+) -> str | None:
+    """Make multiple LLM calls with varying temperatures and return the most common answer.
+
+    Returns None if the 55-second wall-clock deadline is exceeded before any answer is found.
+    """
+    import time
     from collections import Counter
+
+    deadline = time.monotonic() + 55
     temps = [0.3, 0.5, 0.7, 0.9, 1.0, 0.4, 0.6, 0.8][:n_votes]
     answers: list[str] = []
     for temp in temps:
+        if time.monotonic() >= deadline:
+            break
         try:
             resp = llm.chat(
                 [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": full_question},
                 ],
-                think=True,
+                think=False,
                 temperature=temp,
                 top_p=0.95,
-                max_tokens=4096,
+                max_tokens=128,
             )
             ans = _extract_final_answer(resp.content)
             if ans:
@@ -149,7 +167,7 @@ def _majority_vote(
         except Exception:
             continue
     if not answers:
-        raise ValueError("All majority vote attempts failed")
+        return None
     counter = Counter(answers)
     return counter.most_common(1)[0][0]
 

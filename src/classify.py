@@ -7,9 +7,44 @@ decompose step can use the plan directly -- the LLM only kicks in on retries.
 """
 from __future__ import annotations
 
+import re
+
 from src.state import GraphState, ThoughtNode
 from src.llm_client import LLMClient
 from src.planner import QueryPlanner
+
+# ── keyword → puzzle type mapping ──────────────────────────────────────
+
+def classify_equation_subtype(prompt: str) -> str:
+    """Classify equation_transform into one of four subtypes.
+
+    Returns one of: equation_numeric_deduce, equation_numeric_guess,
+    cryptarithm_deduce, cryptarithm_guess.
+    """
+    try:
+        after_header = prompt.split("Below are a few examples:\n", 1)[1]
+        examples_text, rest = after_header.split("\nNow, determine the result for: ", 1)
+        question_text = rest.strip()
+    except (IndexError, ValueError):
+        return "cryptarithm_guess"
+
+    if any(c.isdigit() for c in examples_text):
+        q_match = re.fullmatch(r"(\d+)(\D)(\d+)", question_text)
+        if q_match and re.search(
+            r"\d" + re.escape(q_match.group(2)) + r"\d", examples_text
+        ):
+            return "equation_numeric_deduce"
+        return "equation_numeric_guess"
+
+    if len(question_text) == 5:
+        q_op = question_text[2]
+        for ex_line in examples_text.strip().splitlines():
+            inp = ex_line.split(" = ")[0].strip()
+            if len(inp) == 5 and inp[2] == q_op:
+                return "cryptarithm_deduce"
+
+    return "cryptarithm_guess"
+
 
 # ── keyword → puzzle type mapping ──────────────────────────────────────
 
