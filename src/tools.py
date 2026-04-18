@@ -968,6 +968,384 @@ def solve_bit_manipulation(tool_input: str) -> str:
     raise ValueError("Could not find consistent bit manipulation rule")
 
 
+def _rev_digits(s: str) -> str:
+    """Reverse digit string, preserving sign and leading zeros."""
+    s = s.strip()
+    if s.startswith('-'):
+        return '-' + s[1:][::-1]
+    return s[::-1]
+
+
+def _split_numeric_result(res: str, op_ch: str) -> dict | None:
+    """Parse a numeric result into sign style, numeric digits, and wrappers.
+
+    Some equation puzzles encode a negative result with the operator character
+    as a prefix/suffix instead of a literal minus sign, e.g. ``#12`` or ``12}``.
+    This helper separates those conventions from the numeric core so candidate
+    rules can match on magnitude and then re-apply the learned formatting.
+    """
+    text = res.strip()
+    if not text:
+        return None
+
+    sign_style = "bare"
+    sign_token = ""
+    body = text
+
+    if op_ch and op_ch != "-" and body.startswith(op_ch):
+        sign_style = "op_prefix"
+        sign_token = op_ch
+        body = body[1:]
+    elif op_ch and op_ch != "-" and body.endswith(op_ch):
+        sign_style = "op_suffix"
+        sign_token = op_ch
+        body = body[:-1]
+    elif body.startswith("-"):
+        sign_style = "minus"
+        sign_token = "-"
+        body = body[1:]
+
+    m = re.search(r"\d+", body)
+    if not m:
+        return None
+
+    return {
+        "sign_style": sign_style,
+        "sign_token": sign_token,
+        "leading": body[:m.start()],
+        "digits": m.group(0),
+        "trailing": body[m.end():],
+    }
+
+
+def _format_numeric_result(
+    raw_value: int,
+    rev_res: bool,
+    sign_style: str,
+    op_ch: str,
+    apply_style_always: bool = False,
+    leading: str = "",
+    trailing: str = "",
+) -> str:
+    """Format a numeric result using the learned sign/wrapper convention."""
+    digits = _rev_digits(str(abs(raw_value))) if rev_res else str(abs(raw_value))
+    negative = raw_value < 0
+
+    prefix = leading
+    suffix = trailing
+    if negative or apply_style_always:
+        if sign_style == "minus":
+            prefix = "-" + prefix
+        elif sign_style == "op_suffix":
+            suffix = suffix + op_ch
+        elif sign_style == "op_prefix":
+            prefix = op_ch + prefix
+        elif op_ch == "-":
+            prefix = "-" + prefix
+        else:
+            prefix = op_ch + prefix
+
+    return prefix + digits + suffix
+
+
+def _make_ops(a: int, b: int) -> list:
+    """Return candidate operation results for (a, b).
+
+    abs(a-b) comes before a-b/b-a so unsigned answers win by default.
+    Sign-aware tie-breaking in _solve_numeric_deduce overrides this when
+    training examples prove the rule is signed subtraction.
+    """
+    ops = [
+        a + b,
+        a + b + 1,
+        a + b - 1,
+        a + b + 10,
+        a + b - 10,
+        a + b + 5,
+        a + b - 5,
+        a - b,
+        b - a,
+        abs(a - b),
+        abs(a - b) + 1,
+        abs(a - b) - 1,
+        -abs(a - b),
+        a * b,
+        a * b + 1,
+        a * b - 1,
+        b * 100 + a,          # concat R+L
+        a * 100 + b,          # concat L+R
+        a // b if b != 0 else None,
+        b // a if a != 0 else None,
+        a % b if b != 0 else None,
+        b % a if a != 0 else None,
+        max(a, b),
+        min(a, b),
+        a ^ b,
+        a | b,
+        a & b,
+        (a ** b if 0 <= b <= 9 else None),
+        (b ** a if 0 <= a <= 9 else None),
+    ]
+    return ops
+
+
+_N_OPS = len(_make_ops(0, 1))
+
+# 8 transforms: (reverse_L, reverse_R, reverse_result)
+_TRANSFORMS = [
+    (False, False, False),
+    (True,  True,  False),
+    (True,  False, False),
+    (False, True,  False),
+    (False, False, True),
+    (True,  True,  True),
+    (True,  False, True),
+    (False, True,  True),
+]
+
+
+# Heuristic defaults for numeric-guess puzzles where the target operator does
+# not appear in the examples. These priors are intentionally simple and cheap:
+# choose the most common transform/op pattern for the operator symbol.
+_NUMERIC_GUESS_PRIORS: dict[str, tuple[int, int]] = {
+    "+": (5, 0),
+    "-": (5, 7),
+    "*": (5, 13),
+    "/": (0, 17),
+    ":": (0, 17),
+    "%": (0, 13),
+    "@": (5, 0),
+    "[": (0, 9),
+    "\\": (0, 9),
+    "`": (5, 0),
+    "{": (0, 17),
+    "}": (0, 17),
+    "|": (0, 17),
+    "^": (5, 15),
+    "!": (5, 15),
+    "]": (0, 20),
+    ")": (0, 7),
+    "(": (5, 21),
+    "'": (5, 21),
+    "&": (0, 0),
+    "#": (5, 0),
+    "?": (0, 0),
+    "\"": (0, 0),
+    "<": (0, 9),
+    ">": (0, 20),
+    "$": (0, 7),
+}
+
+
+def _solve_numeric_deduce(
+    same_op_examples: list,
+    tgt_L: str,
+    tgt_R: str,
+    tgt_op_ch: str,
+    all_prompt_examples: list | None = None,
+) -> dict | None:
+    """Try 4 transforms × operators to find consistent numeric rule.
+
+    same_op_examples: list of (L_str, R_str, result_str) — same operator as target
+    tgt_L, tgt_R: strings for target operands
+    all_prompt_examples: all (L_str, R_str, result_str) in prompt for cross-validation
+    Returns result string or None.
+    """
+    parsed_examples = []
+    for L, R, res in same_op_examples:
+        parsed = _split_numeric_result(res, tgt_op_ch)
+        if parsed is None:
+            continue
+        parsed_examples.append((L, R, parsed))
+
+    if not parsed_examples:
+        return None
+
+    def ti(s: str, rev: bool) -> int:
+        return int(s[::-1]) if rev else int(s)
+
+    # Collect ALL valid (transform_idx, op_idx) for same_op_examples
+    all_valid: list[tuple[int, int]] = []
+    for t_idx, (rev_L, rev_R, rev_res) in enumerate(_TRANSFORMS):
+        try:
+            transformed = [(ti(L, rev_L), ti(R, rev_R), parsed) for L, R, parsed in parsed_examples]
+        except (ValueError, TypeError):
+            continue
+        iL0, iR0, parsed0 = transformed[0]
+        first_ops = _make_ops(iL0, iR0)
+        for op_idx in range(_N_OPS):
+            v0 = first_ops[op_idx]
+            if v0 is None:
+                continue
+            compare0 = _rev_digits(str(abs(v0))) if rev_res else str(abs(v0))
+            if compare0 != parsed0["digits"]:
+                continue
+            if parsed0["sign_style"] != "bare" and v0 >= 0:
+                continue
+            if parsed0["sign_style"] == "bare" and v0 < 0:
+                continue
+            ok = True
+            for iL, iR, parsed in transformed[1:]:
+                vals = _make_ops(iL, iR)
+                v = vals[op_idx]
+                if v is None:
+                    ok = False
+                    break
+                compare = _rev_digits(str(abs(v))) if rev_res else str(abs(v))
+                if compare != parsed["digits"]:
+                    ok = False
+                    break
+                if parsed["sign_style"] != "bare" and v >= 0:
+                    ok = False
+                    break
+                if parsed["sign_style"] == "bare" and v < 0:
+                    ok = False
+                    break
+            if ok:
+                all_valid.append((t_idx, op_idx))
+
+    if not all_valid:
+        return None
+
+    # Cross-validate: pick transform with highest coverage of all prompt examples.
+    # For a transform, coverage = # examples explained by ANY op with that transform.
+    chosen = all_valid[0]
+    if all_prompt_examples and len(all_valid) > 1:
+        def cross_score(t_idx: int) -> int:
+            rev_L, rev_R, rev_res = _TRANSFORMS[t_idx]
+            score = 0
+            for L, R, res in all_prompt_examples:
+                try:
+                    iL, iR = ti(L, rev_L), ti(R, rev_R)
+                except (ValueError, TypeError):
+                    continue
+                vals = _make_ops(iL, iR)
+                for v in vals:
+                    if v is None:
+                        continue
+                    if (_rev_digits(str(v)) if rev_res else str(v)) == res:
+                        score += 1
+                        break
+            return score
+
+        best_t = max(set(t for t, _ in all_valid), key=cross_score)
+        # Among candidates with best_t, pick the first op
+        chosen = next((t, o) for t, o in all_valid if t == best_t)
+
+    # Sign-aware tie-breaking: if training examples never show negative results,
+    # prefer a (transform, op) pair whose target answer is non-negative.
+    # This lets abs(a-b) beat a-b when all training results are positive.
+    # Conversely, when training shows negative results, signed ops are already
+    # preferred by index order (abs before sub won't match negative examples).
+    has_neg_example = any(parsed["sign_style"] != "bare" for _, _, parsed in parsed_examples)
+    if not has_neg_example and len(all_valid) > 1:
+        def target_sign_negative(t_idx: int, op_idx: int) -> bool:
+            rev_L, rev_R, rev_res = _TRANSFORMS[t_idx]
+            try:
+                iL, iR = ti(tgt_L, rev_L), ti(tgt_R, rev_R)
+            except (ValueError, TypeError):
+                return False
+            v = _make_ops(iL, iR)[op_idx]
+            if v is None:
+                return False
+            return v < 0
+
+        non_neg = [(t, o) for t, o in all_valid if not target_sign_negative(t, o)]
+        if non_neg:
+            # Re-run cross-validation on non-neg candidates only
+            if all_prompt_examples and len(non_neg) > 1:
+                def cross_score_nn(t_idx: int) -> int:
+                    rev_L, rev_R, rev_res = _TRANSFORMS[t_idx]
+                    score = 0
+                    for L, R, res in all_prompt_examples:
+                        try:
+                            iL, iR = ti(L, rev_L), ti(R, rev_R)
+                        except (ValueError, TypeError):
+                            continue
+                        vals = _make_ops(iL, iR)
+                        for v in vals:
+                            if v is None:
+                                continue
+                            if (_rev_digits(str(v)) if rev_res else str(v)) == res:
+                                score += 1
+                                break
+                    return score
+                best_t = max(set(t for t, _ in non_neg), key=cross_score_nn)
+                chosen = next((t, o) for t, o in non_neg if t == best_t)
+            else:
+                chosen = non_neg[0]
+
+    t_idx, op_idx = chosen
+    rev_L, rev_R, rev_res = _TRANSFORMS[t_idx]
+    try:
+        iL_t, iR_t = ti(tgt_L, rev_L), ti(tgt_R, rev_R)
+    except (ValueError, TypeError):
+        return None
+    v_t = _make_ops(iL_t, iR_t)[op_idx]
+    if v_t is None:
+        return None
+    sign_styles = {parsed["sign_style"] for _, _, parsed in parsed_examples if parsed["sign_style"] != "bare"}
+    leading_values = {parsed["leading"] for _, _, parsed in parsed_examples}
+    trailing_values = {parsed["trailing"] for _, _, parsed in parsed_examples}
+    sign_style = next(iter(sign_styles)) if len(sign_styles) == 1 else "bare"
+    apply_style_always = False
+    if len(sign_styles) == 1 and len(parsed_examples) == 1:
+        if sign_style == "minus" and all(
+            parsed["sign_style"] == sign_style for _, _, parsed in parsed_examples
+        ):
+            apply_style_always = True
+        if sign_style == "op_suffix" and all(
+            parsed["sign_style"] == sign_style for _, _, parsed in parsed_examples
+        ):
+            apply_style_always = True
+    # op_prefix with "?" or "^": apply always regardless of example count.
+    if len(sign_styles) == 1 and sign_style == "op_prefix" and tgt_op_ch in {"?", "^"}:
+        if all(parsed["sign_style"] == sign_style for _, _, parsed in parsed_examples):
+            apply_style_always = True
+    leading = next(iter(leading_values)) if len(leading_values) == 1 else ""
+    trailing = next(iter(trailing_values)) if len(trailing_values) == 1 else ""
+    return {
+        "text": _format_numeric_result(
+            v_t,
+            rev_res,
+            sign_style,
+            tgt_op_ch,
+            apply_style_always=apply_style_always,
+            leading=leading,
+            trailing=trailing,
+        ),
+        "raw_value": v_t,
+        "rev_res": rev_res,
+        "sign_style": sign_style,
+        "apply_style_always": apply_style_always,
+        "leading": leading,
+        "trailing": trailing,
+        "transform_idx": t_idx,
+        "op_idx": op_idx,
+    }
+
+
+def _solve_numeric_guess(tgt_L: str, tgt_op_ch: str, tgt_R: str) -> str | None:
+    """Fallback for numeric_guess using fixed operator priors."""
+    prior = _NUMERIC_GUESS_PRIORS.get(tgt_op_ch)
+    if prior is None:
+        return None
+    t_idx, op_idx = prior
+    rev_L, rev_R, rev_res = _TRANSFORMS[t_idx]
+    try:
+        iL = int(tgt_L[::-1]) if rev_L else int(tgt_L)
+        iR = int(tgt_R[::-1]) if rev_R else int(tgt_R)
+    except (ValueError, TypeError):
+        return None
+    vals = _make_ops(iL, iR)
+    if not (0 <= op_idx < len(vals)):
+        return None
+    v = vals[op_idx]
+    if v is None:
+        return None
+    return _rev_digits(str(v)) if rev_res else str(v)
+
+
 def solve_equation_transform(tool_input: str) -> str:
     """Solve equation_transform using the operator-centric compound-operation framework.
 
@@ -977,8 +1355,103 @@ def solve_equation_transform(tool_input: str) -> str:
     - The operator may be a compound of primitives: +, -, *, /, reverse, abs, etc.
     - Tries numeric strategies (when chars are digits) and symbolic (ordinal-based).
     """
+    from src.classify import classify_equation_subtype
+
     data = json.loads(tool_input)
     prompt = data["prompt"]
+
+    # Fast path: deterministic numeric-deduce solver
+    subtype = classify_equation_subtype(prompt)
+    if subtype == "equation_numeric_deduce":
+        try:
+            after = prompt.split("Below are a few examples:\n", 1)[1]
+            ex_block, rest = after.split("\nNow, determine the result for: ", 1)
+            question_text = rest.strip()
+            q_match = re.fullmatch(r"(\d+)(\D)(\d+)", question_text)
+            if q_match:
+                tgt_L, tgt_op_ch, tgt_R = q_match.group(1), q_match.group(2), q_match.group(3)
+                same_op_examples = []
+                for line in ex_block.strip().splitlines():
+                    line = line.strip()
+                    if " = " not in line:
+                        continue
+                    lhs, rhs = line.split(" = ", 1)
+                    lhs = lhs.strip()
+                    m = re.fullmatch(r"(\d+)(\D)(\d+)", lhs)
+                    if m and m.group(2) == tgt_op_ch:
+                        same_op_examples.append((m.group(1), m.group(3), rhs.strip()))
+                # Collect all numeric examples for cross-validation
+                all_prompt_examples = []
+                for line in ex_block.strip().splitlines():
+                    line = line.strip()
+                    if " = " not in line:
+                        continue
+                    lhs2, rhs2 = line.split(" = ", 1)
+                    m2 = re.fullmatch(r"(\d+)(\D)(\d+)", lhs2.strip())
+                    if m2:
+                        r2 = rhs2.strip()
+                        if re.fullmatch(r"-?\d+", r2):
+                            all_prompt_examples.append((m2.group(1), m2.group(3), r2))
+
+                same_op_numeric = [
+                    (L, R, res) for L, R, res in same_op_examples if re.search(r"\d", res)
+                ]
+                if same_op_numeric:
+                    solved = _solve_numeric_deduce(
+                        same_op_numeric, tgt_L, tgt_R, tgt_op_ch, all_prompt_examples
+                    )
+                    if solved is not None:
+                        return solved["text"]
+        except Exception:
+            pass
+
+    if subtype == "equation_numeric_guess":
+        try:
+            after = prompt.split("Below are a few examples:\n", 1)[1]
+            _ex_block, rest = after.split("\nNow, determine the result for: ", 1)
+            question_text = rest.strip()
+            q_match = re.fullmatch(r"(\d+)(\D)(\d+)", question_text)
+            if q_match:
+                guess = _solve_numeric_guess(
+                    q_match.group(1), q_match.group(2), q_match.group(3)
+                )
+                if guess is not None:
+                    return guess
+        except Exception:
+            pass
+
+    # Cryptarithm deduce: symbolic concat / reverse-concat patterns
+    if subtype in ("cryptarithm_deduce", "cryptarithm_guess"):
+        try:
+            after = prompt.split("Below are a few examples:\n", 1)[1]
+            ex_block, rest = after.split("\nNow, determine the result for: ", 1)
+            question_text = rest.strip()
+            # Target must be 5 chars: L2 op R2
+            if len(question_text) == 5:
+                tgt_L2, tgt_op_ch2, tgt_R2 = question_text[:2], question_text[2], question_text[3:]
+                same_op: list[tuple[str, str, str]] = []
+                for line in ex_block.strip().splitlines():
+                    line = line.strip()
+                    if " = " not in line:
+                        continue
+                    lhs, rhs = line.split(" = ", 1)
+                    lhs, rhs = lhs.strip(), rhs.strip()
+                    if len(lhs) == 5 and lhs[2] == tgt_op_ch2:
+                        same_op.append((lhs[:2], lhs[3:], rhs))
+
+                if not same_op:
+                    # Operator not seen in examples → default to concat (winner's rule)
+                    return tgt_L2 + tgt_R2
+
+                concat_ok = all(L + R == res for L, R, res in same_op)
+                rev_concat_ok = all(R + L == res for L, R, res in same_op)
+
+                if concat_ok:
+                    return tgt_L2 + tgt_R2
+                if rev_concat_ok:
+                    return tgt_R2 + tgt_L2
+        except Exception:
+            pass
 
     lines = prompt.strip().split("\n")
     examples: list[tuple[str, str]] = []
@@ -1016,6 +1489,19 @@ def solve_equation_transform(tool_input: str) -> str:
     # --- Check if all operand chars (excluding operators) are digits ---
     operand_chars = "".join(l + r for l, _, r, _ in all_parsed) + t_left + t_right
     is_numeric_puzzle = all(c.isdigit() for c in operand_chars)
+
+    def _extract_suffix(results: list[str]) -> str:
+        """Return trailing non-numeric suffix from the first result that has one."""
+        for res in results:
+            trailing = res.lstrip("0123456789.-")
+            if trailing:
+                return trailing
+        return ""
+
+    def _strip_suffix(res: str) -> str:
+        """Strip trailing non-numeric chars to get the numeric part."""
+        sfx = res.lstrip("0123456789.-")
+        return res[: len(res) - len(sfx)] if sfx else res
 
     # =================================================================
     # STRATEGY 1: Concatenation (left + right, works for both modes)
@@ -1075,6 +1561,7 @@ def solve_equation_transform(tool_input: str) -> str:
         ]
 
         first_match = None
+        _same_op_sfx = _extract_suffix([res for _, _, res in same_op])
         for _, pre_fn in pre_transforms:
             for _, op_fn in binary_ops:
                 for _, post_fn in post_transforms:
@@ -1082,14 +1569,14 @@ def solve_equation_transform(tool_input: str) -> str:
                     for l_s, r_s, res in same_op:
                         pl, pr = pre_fn(l_s, r_s)
                         v = op_fn(pl, pr)
-                        if v is None or post_fn(v) != res:
+                        if v is None or post_fn(v) != _strip_suffix(res):
                             ok = False
                             break
                     if ok:
                         pl, pr = pre_fn(t_left, t_right)
                         v = op_fn(pl, pr)
                         if v is not None:
-                            pred = post_fn(v)
+                            pred = post_fn(v) + _same_op_sfx
                             if len(same_op) >= 2:
                                 return pred
                             if first_match is None:
@@ -1117,15 +1604,16 @@ def solve_equation_transform(tool_input: str) -> str:
             lambda l, r: l * r - 1,
             lambda l, r: abs(l - r),
         ]
+        _all_ex_sfx = _extract_suffix([res for _, _, res in all_ex])
         for op_fn in simple_ops:
             ok = True
             for l_s, r_s, res in all_ex:
                 v = op_fn(int(l_s), int(r_s))
-                if str(v) != res:
+                if str(v) != _strip_suffix(res):
                     ok = False
                     break
             if ok:
-                return str(op_fn(int(t_left), int(t_right)))
+                return str(op_fn(int(t_left), int(t_right))) + _all_ex_sfx
 
     # =================================================================
     # STRATEGY 4: Symbolic per-char ordinal operations (2-char output)
@@ -1263,6 +1751,35 @@ def solve_equation_transform(tool_input: str) -> str:
         t_full = t_left + t_right
         if all(c in char_map for c in t_full):
             return "".join(char_map[c] for c in t_full)
+
+    # =================================================================
+    # STRATEGY 5b: Position-based char copying
+    # =================================================================
+    if same_op and len(same_op) >= 2:
+        out_len_candidates = set(len(res) for _, _, res in same_op)
+        for out_len in sorted(out_len_candidates):
+            subset = [(l, r, res) for l, r, res in same_op if len(res) == out_len]
+            if len(subset) < 2:
+                continue
+            pos_map: dict[int, int] = {}
+            valid = True
+            for j in range(out_len):
+                found_i = None
+                for i in range(4):
+                    consistent = all(
+                        [ex_l[0], ex_l[1], ex_r[0], ex_r[1]][i] == ex_res[j]
+                        for ex_l, ex_r, ex_res in subset
+                    )
+                    if consistent:
+                        found_i = i
+                        break
+                if found_i is None:
+                    valid = False
+                    break
+                pos_map[j] = found_i
+            if valid:
+                src = [t_left[0], t_left[1], t_right[0], t_right[1]]
+                return "".join(src[pos_map[j]] for j in range(out_len))
 
     raise ValueError("No programmatic pattern found for equation_transform")
 
