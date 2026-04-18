@@ -8,6 +8,8 @@ from src.classify import PUZZLE_SIGNATURES
 from src.config import (
     MODEL_NAME, OLLAMA_BASE_URL, TRAIN_PATH, TEST_PATH, RESULTS_DIR,
     LLM_PROVIDER, DEEPSEEK_API_KEY, DEEPSEEK_MODEL,
+    OPENROUTER_API_KEY, OPENROUTER_MODEL,
+    HF_TOKEN, HF_MODEL,
 )
 from src.graph import build_graph
 from src.llm_client import LLMClient
@@ -74,11 +76,22 @@ def run(
         ollama_base_url=OLLAMA_BASE_URL,
         deepseek_api_key=DEEPSEEK_API_KEY,
         deepseek_model=DEEPSEEK_MODEL,
+        openrouter_api_key=OPENROUTER_API_KEY,
+        openrouter_model=OPENROUTER_MODEL,
+        hf_token=HF_TOKEN,
+        hf_model=HF_MODEL,
     )
     provider = llm._resolve_provider()
 
+    model_display = {
+        "ollama": MODEL_NAME,
+        "openrouter": OPENROUTER_MODEL,
+        "deepseek": DEEPSEEK_MODEL,
+        "huggingface": HF_MODEL,
+    }.get(provider, MODEL_NAME)
+
     print(f"Loaded {len(df)} rows from {dataset_path}")
-    print(f"Provider: {provider}  |  Model: {MODEL_NAME if provider == 'ollama' else DEEPSEEK_MODEL}")
+    print(f"Provider: {provider}  |  Model: {model_display}")
 
     graph = build_graph(llm)
 

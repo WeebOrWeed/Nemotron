@@ -8,6 +8,7 @@ import re
 
 from src.state import GraphState, ThoughtNode, FailureRecord
 from src.llm_client import LLMClient
+from src.classify import classify_equation_subtype
 
 # ── LLM decompose prompt (used only on retries / unknown types) ────────
 
@@ -191,7 +192,21 @@ def make_decompose_node(llm: LLMClient):
             return {"thought_dag": existing_dag}
 
         # ── retry for equation_transform: majority-vote LLM ───────
-        if puzzle_type == "equation_transform" and failure_log:
+        # Cryptarithm subtypes get 0% from LLM — return a pre-answered
+        # "unsolvable" node so the graph exits immediately with no answer.
+        _eq_subtype = classify_equation_subtype(prompt) if puzzle_type == "equation_transform" else ""
+        if puzzle_type == "equation_transform" and failure_log and _eq_subtype in ("cryptarithm_deduce", "cryptarithm_guess"):
+            return {"thought_dag": [
+                ThoughtNode(
+                    id="solve",
+                    question="cryptarithm unsolvable",
+                    depends_on=[],
+                    tool=None,
+                    tool_input=None,
+                    answer="",
+                ),
+            ]}
+        if puzzle_type == "equation_transform" and failure_log and _eq_subtype not in ("cryptarithm_deduce", "cryptarithm_guess"):
             eq_question = (
                 f"{prompt}\n\n"
                 "Look at the examples above. Each 5-character input has an "
