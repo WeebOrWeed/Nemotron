@@ -1,14 +1,11 @@
-"""Unified LLM-based query planner for all six puzzle types.
+"""LLM-based query planner for all six puzzle types.
 
-A single system prompt (``PLANNER_SYSTEM``) describes every puzzle type,
-its composable tools, and the expected DAG topology.  The caller passes
-``puzzle_type`` as the intent; the LLM reads it and generates a
-mermaid DAG + JSON nodes.
+``QueryPlanner.plan(puzzle_type, prompt)`` sends a unified system prompt
+(``PLANNER_SYSTEM``) to the LLM which composes a DAG from the tool
+catalogue.  The generic ``_build_dag`` builder converts the parsed
+MERMAID + NODES output into ``ThoughtNode`` objects.
 
-The generic ``_build_dag`` builder converts the parsed LLM output
-directly into ``ThoughtNode`` objects — no per-type hardcoded builders.
-``depends_on`` is derived from the mermaid edges, and a ``__PROMPT__``
-placeholder in ``tool_input`` is substituted with the actual prompt.
+The LLM is the sole DAG builder — no hardcoded per-type fallbacks.
 """
 from __future__ import annotations
 
@@ -253,31 +250,22 @@ def _build_dag(
 # ── QueryPlanner class ──────────────────────────────────────────────
 
 class QueryPlanner:
-    """Unified LLM-based query planner.
+    """LLM-based query planner.
 
     ``plan(puzzle_type, prompt)`` sends the unified ``PLANNER_SYSTEM``
     prompt with ``PUZZLE_TYPE: <type>`` in the user message.  The LLM
-    generates MERMAID + NODES which are parsed and converted into
-    ``ThoughtNode`` objects by the generic ``_build_dag`` builder.
+    composes a DAG from the tool catalogue, outputting MERMAID edges and
+    JSON node definitions which are parsed into ``ThoughtNode`` objects.
     """
 
     def __init__(self, llm: LLMClient):
         self.llm = llm
 
     def plan(self, puzzle_type: str, prompt: str) -> list[ThoughtNode]:
-        """Generate a DAG for *puzzle_type* by asking the LLM.
+        """Generate a DAG for *puzzle_type* via LLM.
 
-        Parameters
-        ----------
-        puzzle_type : str
-            One of the six known types (e.g. ``"gravity_physics"``).
-        prompt : str
-            The full puzzle prompt text.
-
-        Returns
-        -------
-        list[ThoughtNode]
-            Ready-to-execute DAG nodes.
+        The LLM selects composable tools from the catalogue and wires
+        them into a DAG.  No hardcoded per-type logic.
         """
         if puzzle_type not in KNOWN_TYPES:
             raise ValueError(f"Unknown puzzle type: {puzzle_type}")

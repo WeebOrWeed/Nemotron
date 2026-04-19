@@ -15,6 +15,8 @@ from src.config import (
     LLM_PROVIDER,
     DEEPSEEK_API_KEY,
     DEEPSEEK_MODEL,
+    OPEN_ROUTER_API_KEY,
+    OPEN_ROUTER_MODEL,
 )
 from src.graph import build_graph
 from src.llm_client import LLMClient
@@ -39,6 +41,8 @@ def main() -> None:
         ollama_base_url=OLLAMA_BASE_URL,
         deepseek_api_key=DEEPSEEK_API_KEY,
         deepseek_model=DEEPSEEK_MODEL,
+        openrouter_api_key=OPEN_ROUTER_API_KEY,
+        openrouter_model=OPEN_ROUTER_MODEL,
     )
     print(f"id={ROW_ID}  provider={llm._resolve_provider()}  expected={expected!r}\n")
     print("=" * 72)

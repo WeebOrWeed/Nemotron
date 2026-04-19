@@ -48,12 +48,12 @@ each in the training set).
 
 | Type                 | Signature phrase                              | Task                                          |
 |----------------------|-----------------------------------------------|-----------------------------------------------|
-| `bit_manipulation`   | "bit manipulation"                            | solve_bit_manipulation: brute-force per-bit boolean function search (fully deterministic) |
-| `cipher_decryption`  | "encryption rules"                            | N parallel [split_word_pairs → build_char_map] → merge_char_maps → decrypt_substitution (fully deterministic) |
-| `equation_transform` | "transformation rules"                        | solve_equation_transform: operator-centric compound-operation search (fully deterministic) |
-| `gravity_physics`    | "gravitational constant"                      | 3-node DAG: extract_gravity_obs → compute_gravity_g (weighted LS) → compute_gravity_d |
-| `numeral_conversion` | "numeral system"                              | solve_numeral_conversion: detect Roman numerals and convert target (fully deterministic) |
-| `unit_conversion`    | "unit conversion"                             | 3-node DAG: extract_unit_pairs → geometric_mean_factor → apply_factor_round |
+| `bit_manipulation`   | "bit manipulation"                            | LLM plans DAG → `solve_bit_manipulation` (brute-force per-bit boolean function search) |
+| `cipher_decryption`  | "encryption rules"                            | LLM plans DAG → N parallel [split_word_pairs → build_char_map] → merge_char_maps → decrypt_substitution |
+| `equation_transform` | "transformation rules"                        | LLM plans DAG → `solve_equation_transform` (operator-centric compound-operation search) |
+| `gravity_physics`    | "gravitational constant"                      | LLM plans DAG → extract_gravity_obs → compute_gravity_g → compute_gravity_d |
+| `numeral_conversion` | "numeral system"                              | LLM plans DAG → `solve_numeral_conversion` (detect Roman numerals, convert) |
+| `unit_conversion`    | "unit conversion"                             | LLM plans DAG → extract_unit_pairs → geometric_mean_factor → apply_factor_round |
 
 ## DAG-of-Thoughts
 
@@ -95,7 +95,7 @@ passed as an intent parameter so the LLM selects the correct plan.
 | `bit_manipulation`   | Single node: `solve_bit_manipulation` — brute-force per-bit boolean function search |
 | `equation_transform` | Single node: `solve_equation_transform` — operator-centric compound-operation search |
 
-If a deterministic solver fails, `solver` still uses an LLM retry fallback.
+If a solver node fails, the graph routes back to `decompose` for LLM retry.
 
 ### QueryPlanner (unified LLM-based planner)
 
@@ -247,7 +247,8 @@ class GraphState(TypedDict):
 ```
 Nemotron/
 ├── main.py                 # CLI entry point with --verbose DAG trace and --types filter
-├── trace_row.py            # Optional: run one train id, print each DAG step I/O
+├── trace_row.py            # Run one train id, print each DAG step I/O
+├── train_planner.py        # RL scoring harness: N candidate DAGs per puzzle → JSONL
 ├── requirements.txt        # Python dependencies
 ├── design.md               # This file
 ├── .env.example            # Template for config overrides
@@ -255,7 +256,8 @@ Nemotron/
 │   ├── train.csv           # Kaggle train set (id, prompt, answer)
 │   ├── test.csv            # Kaggle test set  (id, prompt)
 │   ├── gravity_20.csv      # Optional: first 20 gravity_physics rows from train
-│   └── unit_20.csv         # Optional: first 20 unit_conversion rows from train
+│   ├── unit_20.csv         # Optional: first 20 unit_conversion rows from train
+│   └── planner_scores.jsonl # RL harness output: scored DAG candidates
 ├── results/
 │   ├── predictions.csv     # Generated answers (default main.py output)
 │   └── unit_20_predictions.csv  # Example batch: main.py --dataset data/unit_20.csv
@@ -264,27 +266,30 @@ Nemotron/
     ├── config.py            # Env vars: MODEL_NAME, OLLAMA_BASE_URL, LLM_PROVIDER, etc.
     ├── llm_client.py        # Unified LLM client (Ollama local / DeepSeek API fallback)
     ├── state.py             # ThoughtNode, FailureRecord, GraphState
-    ├── classify.py          # Keyword classifier + deterministic DAG plan builder (all 6 types)
-    ├── planner.py           # QueryPlanner: deterministic DAG builders for all puzzle types
+    ├── classify.py          # Keyword classifier + LLM DAG planner (OpenRouter)
+    ├── planner.py           # QueryPlanner: LLM composes DAGs from tool catalogue
     ├── decompose.py         # Pass-through on first pass; LLM re-decompose on retries
     ├── tools.py             # Deterministic tool functions (binary ops, math, substitution)
+    ├── tools_equation.py    # equation_transform solver (extracted for independent work)
     ├── solver.py            # Threaded DAG solver; LLM nodes store full reply, sink answer = last line
     └── graph.py             # LangGraph wiring: classify -> decompose -> solve_next
 ```
 
 ## Configuration
 
-| Variable          | Default                  | Description                                |
-|-------------------|--------------------------|--------------------------------------------|
-| `MODEL_NAME`      | `nemotron-3-nano:4b`     | Ollama model tag                           |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL                          |
-| `LLM_PROVIDER`    | `auto`                   | `auto`, `ollama`, or `deepseek`            |
-| `DEEPSEEK_API_KEY`| *(empty)*                | DeepSeek API key (required when provider≠ollama) |
-| `DEEPSEEK_MODEL`  | `deepseek-chat`          | DeepSeek model name                        |
-| `MAX_RETRIES`     | `3`                      | Max re-decompose attempts on failure       |
-| `TRAIN_PATH`      | `data/train.csv`         | Path to training CSV                       |
-| `TEST_PATH`       | `data/test.csv`          | Path to test CSV                           |
-| `RESULTS_DIR`     | `results`                | Output directory                           |
+| Variable              | Default                                    | Description                                |
+|-----------------------|--------------------------------------------|--------------------------------------------|
+| `MODEL_NAME`          | `nemotron-3-nano:4b`                       | Ollama model tag                           |
+| `OLLAMA_BASE_URL`     | `http://localhost:11434`                   | Ollama server URL                          |
+| `LLM_PROVIDER`        | `auto`                                     | `auto`, `ollama`, `openrouter`, or `deepseek` |
+| `OPEN_ROUTER_API_KEY` | *(empty)*                                  | OpenRouter API key                         |
+| `OPEN_ROUTER_MODEL`   | `nvidia/llama-3.1-nemotron-70b-instruct`   | OpenRouter model name                      |
+| `DEEPSEEK_API_KEY`    | *(empty)*                                  | DeepSeek API key                           |
+| `DEEPSEEK_MODEL`      | `deepseek-chat`                            | DeepSeek model name                        |
+| `MAX_RETRIES`         | `3`                                        | Max re-decompose attempts on failure       |
+| `TRAIN_PATH`          | `data/train.csv`                           | Path to training CSV                       |
+| `TEST_PATH`           | `data/test.csv`                            | Path to test CSV                           |
+| `RESULTS_DIR`         | `results`                                  | Output directory                           |
 
 ## Model
 
@@ -295,20 +300,29 @@ Nemotron/
 - No API key required -- runs entirely locally.
 - Uses native `ollama` Python client with `think=True` for chain-of-thought reasoning.
 
-**Fallback: DeepSeek** (cloud API, OpenAI-compatible).
+**Fallback 1: OpenRouter** (cloud API, OpenAI-compatible).
 
-- Used when Ollama is unreachable and `LLM_PROVIDER=auto` (default), or
-  when forced via `LLM_PROVIDER=deepseek`.
+- Used when Ollama is unreachable and `OPEN_ROUTER_API_KEY` is set
+  (with `LLM_PROVIDER=auto`), or when forced via `LLM_PROVIDER=openrouter`.
+- Default model: `nvidia/llama-3.1-nemotron-70b-instruct`; override with
+  `OPEN_ROUTER_MODEL`.
+- Requires `OPEN_ROUTER_API_KEY` in `.env`.
+
+**Fallback 2: DeepSeek** (cloud API, OpenAI-compatible).
+
+- Used when Ollama and OpenRouter are both unavailable, or when forced
+  via `LLM_PROVIDER=deepseek`.
 - Default model: `deepseek-chat`; set `DEEPSEEK_MODEL=deepseek-reasoner`
   for built-in chain-of-thought.
 - Requires `DEEPSEEK_API_KEY` in `.env`.
 
 All LLM calls go through the unified `LLMClient` (`src/llm_client.py`),
-which dispatches to the selected backend.
+which dispatches to the selected backend. Auto-resolution order:
+Ollama → OpenRouter → DeepSeek.
 
-- In **classify**, all six puzzle types use the `QueryPlanner` to build
-  fully deterministic DAGs — zero LLM calls.  Deterministic solvers in
-  `tools.py` handle the actual computation.
+- In **classify**, a dedicated OpenRouter LLMClient powers the
+  `QueryPlanner` which composes DAGs from the tool catalogue.
+  Execution nodes use the configured `LLM_PROVIDER`.
 
 ## Setup
 
@@ -353,6 +367,46 @@ python main.py --help
 When the CSV has an `answer` column, printed **accuracy** treats two answers as
 a match if strings are equal after strip, or if both parse as floats with
 **absolute difference ≤ 10⁻²** (inclusive, plus a tiny epsilon for rounding).
+
+## RL Training Loop for the DAG Planner
+
+The planner LLM can be improved via reinforcement learning.
+`train_planner.py` is the scoring harness that collects training data.
+
+```
+train_planner.py
+  |
+  |-- Loads train.csv
+  |-- For each puzzle:
+  |     1. Planner generates N candidate DAGs (temperature sampling)
+  |     2. Each DAG is executed through the real solver
+  |     3. Compare final answer to ground truth -> reward score
+  |     4. Log (puzzle_id, planner_output, reward, ...) to JSONL
+  |
+  |-- The scored JSONL can feed:
+  |     a) Few-shot prompt optimization (add best DAGs to PLANNER_SYSTEM)
+  |     b) GRPO fine-tuning (with TRL / OpenRLHF on a local model)
+  |     c) Tool-construction agent (analyze failures, propose new tools)
+```
+
+Reward function:
+
+| Outcome           | Reward |
+|-------------------|--------|
+| Exact match       | +1.0   |
+| Numeric within 0.01 | +0.5 |
+| Valid DAG, wrong answer | -0.5 |
+| Malformed DAG     | -1.0   |
+
+Usage:
+
+```bash
+python train_planner.py --n 8 --limit 200 --types gravity_physics
+python train_planner.py --n 4 --limit 50   # all types, 4 candidates each
+```
+
+Output goes to `data/planner_scores.jsonl` by default (one JSON object per
+candidate per puzzle).
 
 ## Discussion
 

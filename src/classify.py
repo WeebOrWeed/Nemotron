@@ -1,12 +1,12 @@
 """Classifier that identifies the puzzle type AND produces an execution plan.
 
 All six puzzle types use the ``QueryPlanner`` (see ``src/planner.py``).
-
-The classify node outputs both ``puzzle_type`` and ``thought_dag`` so the
-decompose step can use the plan directly -- the LLM only kicks in on retries.
+The planner uses a dedicated OpenRouter LLMClient so it always gets a
+capable model, while execution nodes use whatever ``LLM_PROVIDER`` is set.
 """
 from __future__ import annotations
 
+from src.config import OPEN_ROUTER_API_KEY, OPEN_ROUTER_MODEL
 from src.state import GraphState, ThoughtNode
 from src.llm_client import LLMClient
 from src.planner import QueryPlanner
@@ -26,15 +26,21 @@ PUZZLE_SIGNATURES: dict[str, str] = {
 def make_classify_node(llm: LLMClient):
     """Factory that returns the classify node function with the LLM client bound.
 
-    All puzzle types use ``QueryPlanner.plan(puzzle_type, prompt)``.
+    A separate OpenRouter-backed LLMClient is created for the planner so
+    DAG generation always uses a capable model.
     """
-    planner = QueryPlanner(llm)
+    planner_llm = LLMClient(
+        provider="openrouter",
+        openrouter_api_key=OPEN_ROUTER_API_KEY,
+        openrouter_model=OPEN_ROUTER_MODEL,
+    )
+    planner = QueryPlanner(planner_llm)
 
     def classify_node(state: GraphState) -> dict:
         """Classify the puzzle and produce an execution plan.
 
-        Returns ``puzzle_type`` and ``thought_dag``.  The planner receives
-        the puzzle type as an intent parameter and generates the matching DAG.
+        Returns ``puzzle_type`` and ``thought_dag``.  The planner calls
+        the LLM to compose a DAG from the tool catalogue.
         """
         prompt = state["prompt"]
         prompt_lower = prompt.lower()

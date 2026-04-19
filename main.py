@@ -9,6 +9,7 @@ from src.classify import PUZZLE_SIGNATURES
 from src.config import (
     MODEL_NAME, OLLAMA_BASE_URL, TRAIN_PATH, TEST_PATH, RESULTS_DIR,
     LLM_PROVIDER, DEEPSEEK_API_KEY, DEEPSEEK_MODEL,
+    OPEN_ROUTER_API_KEY, OPEN_ROUTER_MODEL,
 )
 from src.graph import build_graph
 from src.llm_client import LLMClient
@@ -117,12 +118,19 @@ def run(
         ollama_base_url=OLLAMA_BASE_URL,
         deepseek_api_key=DEEPSEEK_API_KEY,
         deepseek_model=DEEPSEEK_MODEL,
+        openrouter_api_key=OPEN_ROUTER_API_KEY,
+        openrouter_model=OPEN_ROUTER_MODEL,
     )
     provider = llm._resolve_provider()
+    model_display = {
+        "ollama": MODEL_NAME,
+        "openrouter": OPEN_ROUTER_MODEL,
+        "deepseek": DEEPSEEK_MODEL,
+    }.get(provider, MODEL_NAME)
 
     total = len(df)
     print(f"Loaded {total} rows from {dataset_path}")
-    print(f"Provider: {provider}  |  Model: {MODEL_NAME if provider == 'ollama' else DEEPSEEK_MODEL}")
+    print(f"Provider: {provider}  |  Model: {model_display}")
     print(f"Batch size: {batch_size}")
 
     graph = build_graph(llm)
