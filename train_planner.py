@@ -235,6 +235,7 @@ def main() -> None:
                 "puzzle_type": puzzle_type,
                 "candidate": ci,
                 "temperature": temp,
+                "prompt": prompt,
                 "planner_output": raw_plan[:4000],
                 "dag_valid": dag_valid,
                 "dag_nodes": len(dag) if dag else 0,
