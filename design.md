@@ -252,6 +252,14 @@ Nemotron/
 ├── requirements.txt        # Python dependencies
 ├── design.md               # This file
 ├── .env.example            # Template for config overrides
+├── notebooks/
+│   ├── grpo_planner.ipynb  # All-in-one Kaggle RL notebook (collect + train + output)
+│   └── kernel-metadata.json # Kaggle kernel push metadata
+├── kaggle_upload/
+│   └── nemotron-code/      # Project source packaged as Kaggle dataset
+│       ├── dataset-metadata.json
+│       ├── src/             # Mirror of src/ for Kaggle
+│       └── data/train.csv
 ├── data/
 │   ├── train.csv           # Kaggle train set (id, prompt, answer)
 │   ├── test.csv            # Kaggle test set  (id, prompt)
@@ -266,7 +274,7 @@ Nemotron/
     ├── config.py            # Env vars: MODEL_NAME, OLLAMA_BASE_URL, LLM_PROVIDER, etc.
     ├── llm_client.py        # Unified LLM client (Ollama local / DeepSeek API fallback)
     ├── state.py             # ThoughtNode, FailureRecord, GraphState
-    ├── classify.py          # Keyword classifier + LLM DAG planner (OpenRouter)
+    ├── classify.py          # Keyword classifier + LLM DAG planner (OpenRouter / DeepSeek)
     ├── planner.py           # QueryPlanner: LLM composes DAGs from tool catalogue
     ├── decompose.py         # Pass-through on first pass; LLM re-decompose on retries
     ├── tools.py             # Deterministic tool functions (binary ops, math, substitution)
@@ -320,9 +328,11 @@ All LLM calls go through the unified `LLMClient` (`src/llm_client.py`),
 which dispatches to the selected backend. Auto-resolution order:
 Ollama → OpenRouter → DeepSeek.
 
-- In **classify**, a dedicated OpenRouter LLMClient powers the
-  `QueryPlanner` which composes DAGs from the tool catalogue.
-  Execution nodes use the configured `LLM_PROVIDER`.
+- In **classify**, a dedicated cloud LLMClient (OpenRouter when
+  `OPEN_ROUTER_API_KEY` is set, otherwise DeepSeek when
+  `DEEPSEEK_API_KEY` is set) powers the `QueryPlanner` which composes
+  DAGs from the tool catalogue.  Execution nodes use the configured
+  `LLM_PROVIDER`.
 
 ## Setup
 
@@ -407,6 +417,33 @@ python train_planner.py --n 4 --limit 50   # all types, 4 candidates each
 
 Output goes to `data/planner_scores.jsonl` by default (one JSON object per
 candidate per puzzle).
+
+### Kaggle RL Pipeline
+
+The full RL loop (data collection + training) can run on Kaggle using
+`notebooks/grpo_planner.ipynb`. The notebook:
+
+1. **Collects** scored data by calling DeepSeek as the planner LLM and
+   executing DAGs via the uploaded `src/tools.py`.
+2. **Trains** a QLoRA adapter on Qwen-7B using SFTTrainer on the winning
+   plans.
+3. **Outputs** the LoRA adapter + an updated `PLANNER_SYSTEM` with embedded
+   few-shot examples.
+
+Supporting files:
+
+| File | Purpose |
+|------|---------|
+| `notebooks/grpo_planner.ipynb` | All-in-one Kaggle notebook |
+| `notebooks/kernel-metadata.json` | Kaggle kernel metadata (GPU, Internet, dataset link) |
+| `kaggle_upload/nemotron-code/` | Project source packaged as a Kaggle dataset |
+
+Sync artifacts back:
+
+```bash
+kaggle kernels output tianlinzhao1/grpo-dag-planner-training -p kaggle_output/
+# Copy planner_system_updated.txt content into PLANNER_SYSTEM in src/planner.py
+```
 
 ## Discussion
 

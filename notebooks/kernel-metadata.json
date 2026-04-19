@@ -1,0 +1,13 @@
+{
+  "id": "tianlinzhao1/grpo-dag-planner-training",
+  "title": "GRPO DAG Planner Training",
+  "code_file": "grpo_planner.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": ["tianlinzhao1/nemotron-pipeline-code"],
+  "competition_sources": [],
+  "kernel_sources": []
+}
