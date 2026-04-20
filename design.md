@@ -420,15 +420,21 @@ candidate per puzzle).
 
 ### Kaggle RL Pipeline
 
-The full RL loop (data collection + training) can run on Kaggle using
-`notebooks/grpo_planner.ipynb`. The notebook:
+The full RL loop (data collection + failure analysis + training) can run
+on Kaggle using `notebooks/grpo_planner.ipynb`. The notebook:
 
 1. **Collects** scored data by calling DeepSeek as the planner LLM and
-   executing DAGs via the uploaded `src/tools.py`.
-2. **Trains** a QLoRA adapter on Qwen-7B using SFTTrainer on the winning
+   executing DAGs via the uploaded `src/tools.py`.  Each node's execution
+   trace (tool, input, output, error) is captured for analysis.
+2. **Analyzes failures** -- for every VALID-but-wrong sample, DeepSeek
+   classifies the root cause (bad plan, missing tool, tool bug, bad input)
+   and proposes a fix.  For `NEW_TOOL` proposals, it generates concrete
+   Python function code ready to paste into `tools.py`.
+3. **Trains** a QLoRA adapter on Qwen-7B using SFTTrainer on the winning
    plans.
-3. **Outputs** the LoRA adapter + an updated `PLANNER_SYSTEM` with embedded
-   few-shot examples.
+4. **Outputs** the LoRA adapter, an updated `PLANNER_SYSTEM` with embedded
+   few-shot examples, and a `failure_analysis.json` with all proposals and
+   generated tool code.
 
 Supporting files:
 
