@@ -7,8 +7,7 @@ import pandas as pd
 from src.classify import PUZZLE_SIGNATURES
 from src.config import (
     MODEL_NAME, OLLAMA_BASE_URL, TRAIN_PATH, TEST_PATH, RESULTS_DIR,
-    LLM_PROVIDER, DEEPSEEK_API_KEY, DEEPSEEK_MODEL,
-    OPENROUTER_API_KEY, OPENROUTER_MODEL,
+    LLM_PROVIDER, OPENROUTER_API_KEY, OPENROUTER_MODEL,
     HF_TOKEN, HF_MODEL,
 )
 from src.graph import build_graph
@@ -74,8 +73,6 @@ def run(
         provider=LLM_PROVIDER,
         model_name=MODEL_NAME,
         ollama_base_url=OLLAMA_BASE_URL,
-        deepseek_api_key=DEEPSEEK_API_KEY,
-        deepseek_model=DEEPSEEK_MODEL,
         openrouter_api_key=OPENROUTER_API_KEY,
         openrouter_model=OPENROUTER_MODEL,
         hf_token=HF_TOKEN,
@@ -86,7 +83,6 @@ def run(
     model_display = {
         "ollama": MODEL_NAME,
         "openrouter": OPENROUTER_MODEL,
-        "deepseek": DEEPSEEK_MODEL,
         "huggingface": HF_MODEL,
     }.get(provider, MODEL_NAME)
 

@@ -1,0 +1,27 @@
+Loaded 9500 rows from data/train.csv
+Provider: openrouter  |  Model: nvidia/nemotron-3-nano-30b-a3b:free
+[1/9500] id=00066667 ... MATCH done (0.0s)
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 10010111
+[2/9500] id=000b53cf ... MATCH done (0.0s)
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 01000011
+[3/9500] id=00189f6a ... ERROR: Error code: 429 - {'error': {'message': 'Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day', 'code': 429, 'metadata': {'headers': {'X-RateLimit-Limit': '50', 'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1776470400000'}, 'provider_name': None}}, 'user_id': 'user_3CK6YbC8lgHVA1mueJ8AR3V4qkh'}
+MISS done (63.5s)
+    expected: cat imagines book  |  actual: 
+[4/9500] id=001b24c4 ... MATCH done (0.0s)
+    type=numeral_conversion  nodes=1  retries=0
+    [OK] solve_numeral (tool:solve_numeral_conversion) deps=(root) -> XXXVIII
+[5/9500] id=001c63cb ... ERROR: Error code: 429 - {'error': {'message': 'Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day', 'code': 429, 'metadata': {'headers': {'X-RateLimit-Limit': '50', 'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1776470400000'}, 'provider_name': None}}, 'user_id': 'user_3CK6YbC8lgHVA1mueJ8AR3V4qkh'}
+MISS done (1.7s)
+    expected: wizard creates secret  |  actual: 
+[6/9500] id=00208201 ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 16.65
+[7/9500] id=0031df9c ... MATCH done (0.0s)
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 00110100
+[8/9500] id=0040ff76 ... MATCH done (0.0s)
+    type=gravity_physics  nodes=1  retries=0
+    [OK] solve_gravity (tool:solve_gravity_physics) deps=(root) -> 154.62
+[9/9500] id=00457d26 ... 

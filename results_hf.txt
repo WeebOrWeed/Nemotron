@@ -1,0 +1,222 @@
+Loaded 50 rows from data/train.csv
+Provider: huggingface  |  Model: nvidia/OpenMath-Nemotron-14B-Kaggle
+[1/50] id=00066667 ... MATCH done (0.0s)
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 10010111
+[2/50] id=000b53cf ... MATCH done (0.0s)
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 01000011
+[3/50] id=00189f6a ... MATCH done (700.9s)
+    type=cipher_decryption  nodes=12  retries=0
+    [OK] extract_pairs_1 (tool:split_word_pairs) deps=(root) -> {"pairs": [["ucoov", "queen"], ["pwgtfyoqg", "discovers"], [
+    [OK] create_mapping_1 (tool:build_char_map) deps=extract_pairs_1 -> {"u": "q", "c": "u", "o": "e", "v": "n", "p": "d", "w": "i",
+    [OK] extract_pairs_2 (tool:split_word_pairs) deps=(root) -> {"pairs": [["pqrsfv", "dragon"], ["pqorzg", "dreams"], ["wvg
+    [OK] create_mapping_2 (tool:build_char_map) deps=extract_pairs_2 -> {"p": "d", "q": "r", "r": "a", "s": "g", "f": "o", "v": "n",
+    [OK] extract_pairs_3 (tool:split_word_pairs) deps=(root) -> {"pairs": [["gbcpovb", "student"], ["tqorbog", "creates"], [
+    [OK] create_mapping_3 (tool:build_char_map) deps=extract_pairs_3 -> {"g": "s", "b": "t", "c": "u", "p": "d", "o": "e", "v": "n",
+    [OK] extract_pairs_4 (tool:split_word_pairs) deps=(root) -> {"pairs": [["bxo", "the"], ["sfjpov", "golden"], ["pqrsfv", 
+    [OK] create_mapping_4 (tool:build_char_map) deps=extract_pairs_4 -> {"b": "t", "x": "h", "o": "e", "s": "g", "f": "o", "j": "l",
+    [OK] extract_pairs_5 (tool:split_word_pairs) deps=(root) -> {"pairs": [["nqwvtogg", "princess"], ["qorpg", "reads"], ["b
+    [OK] create_mapping_5 (tool:build_char_map) deps=extract_pairs_5 -> {"n": "p", "q": "r", "w": "i", "v": "n", "t": "c", "o": "e",
+    [OK] merge_mapping (tool:merge_char_maps) deps=create_mapping_1,create_mapping_2,create_mapping_3,create_mapping_4,create_mapping_5 -> {"u": "q", "c": "u", "o": "e", "v": "n", "p": "d", "w": "i",
+    [OK] translate (tool:decrypt_substitution) deps=merge_mapping -> cat imagines book
+[4/50] id=001b24c4 ... MATCH done (0.0s)
+    type=numeral_conversion  nodes=1  retries=0
+    [OK] solve_numeral (tool:solve_numeral_conversion) deps=(root) -> XXXVIII
+[5/50] id=001c63cb ... MATCH done (505.6s)
+    type=cipher_decryption  nodes=12  retries=0
+    [OK] extract_pairs_1 (tool:split_word_pairs) deps=(root) -> {"pairs": [["wkgqa", "mouse"], ["lsrqaq", "chases"], ["wneek
+    [OK] create_mapping_1 (tool:build_char_map) deps=extract_pairs_1 -> {"w": "m", "k": "o", "g": "u", "q": "s", "a": "e", "l": "c",
+    [OK] extract_pairs_2 (tool:split_word_pairs) deps=(root) -> {"pairs": [["wkgqa", "mouse"], ["nwrjnvaq", "imagines"], ["n
+    [OK] create_mapping_2 (tool:build_char_map) deps=extract_pairs_2 -> {"w": "m", "k": "o", "g": "u", "q": "s", "a": "e", "n": "i",
+    [OK] extract_pairs_3 (tool:split_word_pairs) deps=(root) -> {"pairs": [["srppae", "hatter"], ["oerhq", "draws"], ["gvoae
+    [OK] create_mapping_3 (tool:build_char_map) deps=extract_pairs_3 -> {"s": "h", "r": "a", "p": "t", "a": "e", "e": "r", "o": "d",
+    [OK] extract_pairs_4 (tool:split_word_pairs) deps=(root) -> {"pairs": [["psa", "the"], ["qaleap", "secret"], ["hncreo", 
+    [OK] create_mapping_4 (tool:build_char_map) deps=extract_pairs_4 -> {"p": "t", "s": "h", "a": "e", "q": "s", "l": "c", "e": "r",
+    [OK] extract_pairs_5 (tool:split_word_pairs) deps=(root) -> {"pairs": [["psa", "the"], ["hnqa", "wise"], ["xneo", "bird"
+    [OK] create_mapping_5 (tool:build_char_map) deps=extract_pairs_5 -> {"p": "t", "s": "h", "a": "e", "h": "w", "n": "i", "q": "s",
+    [OK] merge_mapping (tool:merge_char_maps) deps=create_mapping_1,create_mapping_2,create_mapping_3,create_mapping_4,create_mapping_5 -> {"w": "m", "k": "o", "g": "u", "q": "s", "a": "e", "l": "c",
+    [OK] translate (tool:decrypt_substitution) deps=merge_mapping -> wizard creates secret
+[6/50] id=00208201 ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 16.65
+[7/50] id=0031df9c ... MATCH done (0.0s)
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 00110100
+[8/50] id=0040ff76 ... MATCH done (0.0s)
+    type=gravity_physics  nodes=1  retries=0
+    [OK] solve_gravity (tool:solve_gravity_physics) deps=(root) -> 154.62
+[9/50] id=00457d26 ... MISS done (47.7s)
+    expected: @&  |  actual: Each rule seems to have a left-hand side (LHS) and a right-hand side (RHS).
+    type=equation_transform  nodes=1  retries=0
+    [OK] solve_equation (tool:solve_equation_transform) deps=(root) -> Each rule seems to have a left-hand side (LHS) and a right-h
+[10/50] id=00463d04 ... MATCH done (0.0s)
+    type=gravity_physics  nodes=1  retries=0
+    [OK] solve_gravity (tool:solve_gravity_physics) deps=(root) -> 50.51
+[11/50] id=0047365c ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 10.62
+[12/50] id=004ef7c7 ... MATCH done (0.0s)
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 11111111
+[13/50] id=0059df78 ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 43.43
+[14/50] id=005ad22a ... MATCH done (594.9s)
+    type=cipher_decryption  nodes=12  retries=0
+    [OK] extract_pairs_1 (tool:split_word_pairs) deps=(root) -> {"pairs": [["hmxad", "alice"], ["apdhvdq", "creates"], ["vid
+    [OK] create_mapping_1 (tool:build_char_map) deps=extract_pairs_1 -> {"h": "a", "m": "l", "x": "i", "a": "c", "d": "e", "p": "r",
+    [OK] extract_pairs_2 (tool:split_word_pairs) deps=(root) -> {"pairs": [["zxuhpl", "wizard"], ["zhvaidq", "watches"], ["x
+    [OK] create_mapping_2 (tool:build_char_map) deps=extract_pairs_2 -> {"z": "w", "x": "i", "u": "z", "h": "a", "p": "r", "l": "d",
+    [OK] extract_pairs_3 (tool:split_word_pairs) deps=(root) -> {"pairs": [["nfddy", "queen"], ["xohexydq", "imagines"], ["x
+    [OK] create_mapping_3 (tool:build_char_map) deps=extract_pairs_3 -> {"n": "q", "f": "u", "d": "e", "y": "n", "x": "i", "o": "m",
+    [OK] extract_pairs_4 (tool:split_word_pairs) deps=(root) -> {"pairs": [["osfqd", "mouse"], ["qddq", "sees"], ["lssp", "d
+    [OK] create_mapping_4 (tool:build_char_map) deps=extract_pairs_4 -> {"o": "m", "s": "o", "f": "u", "q": "s", "d": "e", "l": "d",
+    [OK] extract_pairs_5 (tool:split_word_pairs) deps=(root) -> {"pairs": [["vid", "the"], ["amdtdp", "clever"], ["zxuhpl", 
+    [OK] create_mapping_5 (tool:build_char_map) deps=extract_pairs_5 -> {"v": "t", "i": "h", "d": "e", "a": "c", "m": "l", "t": "v",
+    [OK] merge_mapping (tool:merge_char_maps) deps=create_mapping_1,create_mapping_2,create_mapping_3,create_mapping_4,create_mapping_5 -> {"h": "a", "m": "l", "x": "i", "a": "c", "d": "e", "p": "r",
+    [OK] translate (tool:decrypt_substitution) deps=merge_mapping -> king chases castle
+[15/50] id=00600e6e ... MATCH done (0.0s)
+    type=numeral_conversion  nodes=1  retries=0
+    [OK] solve_numeral (tool:solve_numeral_conversion) deps=(root) -> LXVII
+[16/50] id=00619cba ... MATCH done (0.0s)
+    type=gravity_physics  nodes=1  retries=0
+    [OK] solve_gravity (tool:solve_gravity_physics) deps=(root) -> 91.84
+[17/50] id=00662ac2 ... MATCH done (0.0s)
+    type=gravity_physics  nodes=1  retries=0
+    [OK] solve_gravity (tool:solve_gravity_physics) deps=(root) -> 11.78
+[18/50] id=00674059 ... MATCH done (482.0s)
+    type=cipher_decryption  nodes=8  retries=0
+    [OK] extract_pairs_1 (tool:split_word_pairs) deps=(root) -> {"pairs": [["xkffmh", "hatter"], ["chmkfmn", "creates"], ["e
+    [OK] create_mapping_1 (tool:build_char_map) deps=extract_pairs_1 -> {"x": "h", "k": "a", "f": "t", "m": "e", "h": "r", "c": "c",
+    [OK] extract_pairs_2 (tool:split_word_pairs) deps=(root) -> {"pairs": [["hkyydf", "rabbit"], ["cxknmn", "chases"], ["chb
+    [OK] create_mapping_2 (tool:build_char_map) deps=extract_pairs_2 -> {"h": "r", "k": "a", "y": "b", "d": "i", "f": "t", "c": "c",
+    [OK] extract_pairs_3 (tool:split_word_pairs) deps=(root) -> {"pairs": [["shkawg", "dragon"], ["cxknmn", "chases"], ["dg"
+    [OK] create_mapping_3 (tool:build_char_map) deps=extract_pairs_3 -> {"s": "d", "h": "r", "k": "a", "a": "g", "w": "o", "g": "n",
+    [OK] merge_mapping (tool:merge_char_maps) deps=create_mapping_1,create_mapping_2,create_mapping_3 -> {"x": "h", "k": "a", "f": "t", "m": "e", "h": "r", "c": "c",
+    [OK] translate (tool:decrypt_substitution) deps=merge_mapping -> alice watches under wonderland
+[19/50] id=006a46d3 ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 19.00
+[20/50] id=0073bcbb ... MATCH done (0.0s)
+    type=gravity_physics  nodes=1  retries=0
+    [OK] solve_gravity (tool:solve_gravity_physics) deps=(root) -> 20.33
+[21/50] id=00754598 ... MATCH done (0.0s)
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 11101111
+[22/50] id=00890aff ... MATCH done (0.0s)
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 01110000
+[23/50] id=008b52fd ... MATCH done (0.0s)
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 01100101
+[24/50] id=009a74b6 ... MISS done (0.0s)
+    expected: 11111011  |  actual: 11000011
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 11000011
+[25/50] id=00a3fd23 ... MATCH done (722.5s)
+    type=cipher_decryption  nodes=10  retries=0
+    [OK] extract_pairs_1 (tool:split_word_pairs) deps=(root) -> {"pairs": [["wfmkg", "mouse"], ["gajifbgk", "explores"], ["v
+    [OK] create_mapping_1 (tool:build_char_map) deps=extract_pairs_1 -> {"w": "m", "f": "o", "m": "u", "k": "s", "g": "e", "a": "x",
+    [OK] extract_pairs_2 (tool:split_word_pairs) deps=(root) -> {"pairs": [["yuelxq", "knight"], ["rbgdwk", "dreams"], ["eu"
+    [OK] create_mapping_2 (tool:build_char_map) deps=extract_pairs_2 -> {"y": "k", "u": "n", "e": "i", "l": "g", "x": "h", "q": "t",
+    [OK] extract_pairs_3 (tool:split_word_pairs) deps=(root) -> {"pairs": [["jbeuvgkk", "princess"], ["pdqvxgk", "watches"],
+    [OK] create_mapping_3 (tool:build_char_map) deps=extract_pairs_3 -> {"j": "p", "b": "r", "e": "i", "u": "n", "v": "c", "g": "e",
+    [OK] extract_pairs_4 (tool:split_word_pairs) deps=(root) -> {"pairs": [["qxg", "the"], ["duveguq", "ancient"], ["dievg",
+    [OK] create_mapping_4 (tool:build_char_map) deps=extract_pairs_4 -> {"q": "t", "x": "h", "g": "e", "d": "a", "u": "n", "v": "c",
+    [OK] merge_mapping (tool:merge_char_maps) deps=create_mapping_1,create_mapping_2,create_mapping_3,create_mapping_4 -> {"w": "m", "f": "o", "m": "u", "k": "s", "g": "e", "a": "x",
+    [OK] translate (tool:decrypt_substitution) deps=merge_mapping -> wizard watches through library
+[26/50] id=00a77d86 ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 20.56
+[27/50] id=00c032a8 ... MISS done (53.6s)
+    expected: \^?  |  actual: And our task is to transform " ))!\". Let me write that out again to make sure: " ))!\". Hmm, maybe it's a typo? Wait, no, the original says " ))!\". Let
+    type=equation_transform  nodes=1  retries=0
+    [OK] solve_equation (tool:solve_equation_transform) deps=(root) -> And our task is to transform " ))!\". Let me write that out 
+[28/50] id=00c8ab45 ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 23.75
+[29/50] id=00d1932c ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 12.48
+[30/50] id=00d8b3db ... MISS done (0.0s)
+    expected: 17/  |  actual: 17
+    type=equation_transform  nodes=1  retries=0
+    [OK] solve_equation (tool:solve_equation_transform) deps=(root) -> 17
+[31/50] id=00d9f682 ... MATCH done (0.0s)
+    type=numeral_conversion  nodes=1  retries=0
+    [OK] solve_numeral (tool:solve_numeral_conversion) deps=(root) -> C
+[32/50] id=00ec1c63 ... MATCH done (0.0s)
+    type=gravity_physics  nodes=1  retries=0
+    [OK] solve_gravity (tool:solve_gravity_physics) deps=(root) -> 7.66
+[33/50] id=00ed1836 ... MATCH done (0.0s)
+    type=gravity_physics  nodes=1  retries=0
+    [OK] solve_gravity (tool:solve_gravity_physics) deps=(root) -> 24.28
+[34/50] id=00efa37c ... MATCH done (703.0s)
+    type=cipher_decryption  nodes=12  retries=0
+    [OK] extract_pairs_1 (tool:split_word_pairs) deps=(root) -> {"pairs": [["vmelt", "alice"], ["lyvutu", "chases"], ["wyt",
+    [OK] create_mapping_1 (tool:build_char_map) deps=extract_pairs_1 -> {"v": "a", "m": "l", "e": "i", "l": "c", "t": "e", "y": "h",
+    [OK] extract_pairs_2 (tool:split_word_pairs) deps=(root) -> {"pairs": [["lvw", "cat"], ["afobd", "found"], ["wyt", "the"
+    [OK] create_mapping_2 (tool:build_char_map) deps=extract_pairs_2 -> {"l": "c", "v": "a", "w": "t", "a": "f", "f": "o", "o": "u",
+    [OK] extract_pairs_3 (tool:split_word_pairs) deps=(root) -> {"pairs": [["wyt", "the"], ["uemitc", "silver"], ["wtvlytc",
+    [OK] create_mapping_3 (tool:build_char_map) deps=extract_pairs_3 -> {"w": "t", "y": "h", "t": "e", "u": "s", "e": "i", "m": "l",
+    [OK] extract_pairs_4 (tool:split_word_pairs) deps=(root) -> {"pairs": [["jcebltuu", "princess"], ["lctvwtu", "creates"],
+    [OK] create_mapping_4 (tool:build_char_map) deps=extract_pairs_4 -> {"j": "p", "c": "r", "e": "i", "b": "n", "l": "c", "t": "e",
+    [OK] extract_pairs_5 (tool:split_word_pairs) deps=(root) -> {"pairs": [["pbexyw", "knight"], ["hvwlytu", "watches"], ["w
+    [OK] create_mapping_5 (tool:build_char_map) deps=extract_pairs_5 -> {"p": "k", "b": "n", "e": "i", "x": "g", "y": "h", "w": "t",
+    [OK] merge_mapping (tool:merge_char_maps) deps=create_mapping_1,create_mapping_2,create_mapping_3,create_mapping_4,create_mapping_5 -> {"v": "a", "m": "l", "e": "i", "l": "c", "t": "e", "y": "h",
+    [OK] translate (tool:decrypt_substitution) deps=merge_mapping -> turtle watches the mysterious garden
+[35/50] id=00fdc0be ... MATCH done (0.0s)
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 11111111
+[36/50] id=010055e2 ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 28.29
+[37/50] id=0106eb4a ... MATCH done (0.0s)
+    type=numeral_conversion  nodes=1  retries=0
+    [OK] solve_numeral (tool:solve_numeral_conversion) deps=(root) -> LXXXIV
+[38/50] id=0122d53a ... MATCH done (0.0s)
+    type=numeral_conversion  nodes=1  retries=0
+    [OK] solve_numeral (tool:solve_numeral_conversion) deps=(root) -> LI
+[39/50] id=01248b76 ... MISS done (0.0s)
+    expected: 11000101  |  actual: 10000101
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 10000101
+[40/50] id=012cab1f ... MISS done (50.7s)
+    expected: |@{  |  actual: Wait, actually, the fifth example might be (`"`@ = `%`@). Let me
+    type=equation_transform  nodes=1  retries=0
+    [OK] solve_equation (tool:solve_equation_transform) deps=(root) -> Wait, actually, the fifth example might be (`"`@ = `%`@). Le
+[41/50] id=012fb81b ... MISS done (0.0s)
+    expected: 10000100  |  actual: 10010001
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 10010001
+[42/50] id=0133bcec ... MATCH done (0.0s)
+    type=equation_transform  nodes=1  retries=0
+    [OK] solve_equation (tool:solve_equation_transform) deps=(root) -> \([#
+[43/50] id=0140788e ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 38.74
+[44/50] id=01466f0b ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 46.91
+[45/50] id=014c4f83 ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 54.29
+[46/50] id=014c7478 ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 66.59
+[47/50] id=015430cf ... MATCH done (0.0s)
+    type=numeral_conversion  nodes=1  retries=0
+    [OK] solve_numeral (tool:solve_numeral_conversion) deps=(root) -> LXXVII
+[48/50] id=0162e157 ... MATCH done (0.0s)
+    type=numeral_conversion  nodes=1  retries=0
+    [OK] solve_numeral (tool:solve_numeral_conversion) deps=(root) -> LII
+[49/50] id=016482c8 ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 62.32
+[50/50] id=016c474c ... MATCH done (0.0s)
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 00000100
+
+Saved 50 predictions to results/predictions.csv
+Accuracy: 43/50 (86.0%)

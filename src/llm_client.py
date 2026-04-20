@@ -1,8 +1,7 @@
-"""Unified LLM client supporting Ollama (local) and DeepSeek (API) backends.
+"""Unified LLM client supporting Ollama, OpenRouter, and HuggingFace backends.
 
 Auto-selects the provider based on ``LLM_PROVIDER`` env var.  When set to
-``"auto"`` (default), tries Ollama first and falls back to DeepSeek if the
-Ollama server is unreachable.
+``"auto"`` (default), tries Ollama first and falls back to OpenRouter.
 """
 from __future__ import annotations
 
@@ -24,13 +23,11 @@ class LLMResponse:
 
 @dataclass
 class LLMClient:
-    """Thin wrapper that dispatches chat() to Ollama, OpenRouter, or DeepSeek."""
+    """Thin wrapper that dispatches chat() to Ollama, OpenRouter, or HuggingFace."""
 
     provider: str = "auto"
     model_name: str = "nemotron-3-nano:4b"
     ollama_base_url: str = "http://localhost:11434"
-    deepseek_api_key: str = ""
-    deepseek_model: str = "deepseek-chat"
     openrouter_api_key: str = ""
     openrouter_model: str = "nvidia/nemotron-3-nano-30b-a3b:free"
     hf_token: str = ""
@@ -43,11 +40,11 @@ class LLMClient:
         if self._resolved_provider is not None:
             return self._resolved_provider
 
-        if self.provider in ("ollama", "openrouter", "deepseek", "huggingface"):
+        if self.provider in ("ollama", "openrouter", "huggingface"):
             self._resolved_provider = self.provider
             return self._resolved_provider
 
-        # auto: try ollama, fall back to openrouter, then deepseek
+        # auto: try ollama, fall back to openrouter
         try:
             c = ollama.Client(host=self.ollama_base_url)
             c.list()
@@ -55,12 +52,9 @@ class LLMClient:
         except Exception:
             if self.openrouter_api_key:
                 self._resolved_provider = "openrouter"
-            elif self.deepseek_api_key:
-                self._resolved_provider = "deepseek"
             else:
                 raise RuntimeError(
-                    "Ollama is unreachable and neither OPENROUTER_API_KEY nor "
-                    "DEEPSEEK_API_KEY is set."
+                    "Ollama is unreachable and OPENROUTER_API_KEY is not set."
                 )
         return self._resolved_provider
 
@@ -83,8 +77,7 @@ class LLMClient:
         if provider == "huggingface":
             return self._chat_huggingface(messages, temperature=temperature,
                                           top_p=top_p, max_tokens=max_tokens)
-        return self._chat_deepseek(messages, think=think, temperature=temperature,
-                                   top_p=top_p, max_tokens=max_tokens)
+        raise RuntimeError(f"Unknown provider: {provider!r}")
 
     # ── Ollama ────────────────────────────────────────────────────────────
 
@@ -169,22 +162,3 @@ class LLMClient:
             content = data["choices"][0]["message"]["content"] or ""
             return LLMResponse(content=content)
         raise RuntimeError("HuggingFace: max retries exceeded")
-
-    # ── DeepSeek (OpenAI-compatible) ──────────────────────────────────────
-
-    def _chat_deepseek(self, messages, *, think, temperature, top_p, max_tokens) -> LLMResponse:
-        client = OpenAI(
-            api_key=self.deepseek_api_key,
-            base_url="https://api.deepseek.com",
-        )
-        resp = client.chat.completions.create(
-            model=self.deepseek_model,
-            messages=messages,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
-        )
-        choice = resp.choices[0]
-        content = choice.message.content or ""
-        reasoning = getattr(choice.message, "reasoning_content", None)
-        return LLMResponse(content=content, thinking=reasoning)

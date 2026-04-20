@@ -1,0 +1,168 @@
+Loaded 50 rows from data/train.csv
+Provider: openrouter  |  Model: nvidia/nemotron-3-nano-30b-a3b:free
+[1/50] id=00066667 ... MATCH done (0.0s)
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 10010111
+[2/50] id=000b53cf ... MATCH done (0.0s)
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 01000011
+[3/50] id=00189f6a ... ERROR: Error code: 429 - {'error': {'message': 'Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day', 'code': 429, 'metadata': {'headers': {'X-RateLimit-Limit': '50', 'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1776470400000'}, 'provider_name': None}}, 'user_id': 'user_3CK6YbC8lgHVA1mueJ8AR3V4qkh'}
+MISS done (1.7s)
+    expected: cat imagines book  |  actual: 
+[4/50] id=001b24c4 ... MATCH done (0.0s)
+    type=numeral_conversion  nodes=1  retries=0
+    [OK] solve_numeral (tool:solve_numeral_conversion) deps=(root) -> XXXVIII
+[5/50] id=001c63cb ... ERROR: Error code: 429 - {'error': {'message': 'Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day', 'code': 429, 'metadata': {'headers': {'X-RateLimit-Limit': '50', 'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1776470400000'}, 'provider_name': None}}, 'user_id': 'user_3CK6YbC8lgHVA1mueJ8AR3V4qkh'}
+MISS done (1.6s)
+    expected: wizard creates secret  |  actual: 
+[6/50] id=00208201 ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 16.65
+[7/50] id=0031df9c ... MATCH done (0.0s)
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 00110100
+[8/50] id=0040ff76 ... MATCH done (0.0s)
+    type=gravity_physics  nodes=1  retries=0
+    [OK] solve_gravity (tool:solve_gravity_physics) deps=(root) -> 154.62
+[9/50] id=00457d26 ... MISS done (0.0s)
+    expected: @&  |  actual: 
+    type=equation_transform  nodes=1  retries=1
+    [OK] solve (llm) deps=(root) -> 
+    failures: 1
+      - solve_equation: cryptarithm puzzle (cryptarithm_deduce): skipping LLM fallback
+[10/50] id=00463d04 ... MATCH done (0.0s)
+    type=gravity_physics  nodes=1  retries=0
+    [OK] solve_gravity (tool:solve_gravity_physics) deps=(root) -> 50.51
+[11/50] id=0047365c ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 10.62
+[12/50] id=004ef7c7 ... MATCH done (0.0s)
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 11111111
+[13/50] id=0059df78 ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 43.43
+[14/50] id=005ad22a ... ERROR: Error code: 429 - {'error': {'message': 'Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day', 'code': 429, 'metadata': {'headers': {'X-RateLimit-Limit': '50', 'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1776470400000'}, 'provider_name': None}}, 'user_id': 'user_3CK6YbC8lgHVA1mueJ8AR3V4qkh'}
+MISS done (63.5s)
+    expected: king chases castle  |  actual: 
+[15/50] id=00600e6e ... MATCH done (0.0s)
+    type=numeral_conversion  nodes=1  retries=0
+    [OK] solve_numeral (tool:solve_numeral_conversion) deps=(root) -> LXVII
+[16/50] id=00619cba ... MATCH done (0.0s)
+    type=gravity_physics  nodes=1  retries=0
+    [OK] solve_gravity (tool:solve_gravity_physics) deps=(root) -> 91.84
+[17/50] id=00662ac2 ... MATCH done (0.0s)
+    type=gravity_physics  nodes=1  retries=0
+    [OK] solve_gravity (tool:solve_gravity_physics) deps=(root) -> 11.78
+[18/50] id=00674059 ... ERROR: Error code: 429 - {'error': {'message': 'Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day', 'code': 429, 'metadata': {'headers': {'X-RateLimit-Limit': '50', 'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1776470400000'}, 'provider_name': None}}, 'user_id': 'user_3CK6YbC8lgHVA1mueJ8AR3V4qkh'}
+MISS done (1.7s)
+    expected: alice watches under wonderland  |  actual: 
+[19/50] id=006a46d3 ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 19.00
+[20/50] id=0073bcbb ... MATCH done (0.0s)
+    type=gravity_physics  nodes=1  retries=0
+    [OK] solve_gravity (tool:solve_gravity_physics) deps=(root) -> 20.33
+[21/50] id=00754598 ... MATCH done (0.0s)
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 11101111
+[22/50] id=00890aff ... MATCH done (0.0s)
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 01110000
+[23/50] id=008b52fd ... MATCH done (0.0s)
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 01100101
+[24/50] id=009a74b6 ... MISS done (0.0s)
+    expected: 11111011  |  actual: 11000011
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 11000011
+[25/50] id=00a3fd23 ... ERROR: Error code: 429 - {'error': {'message': 'Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day', 'code': 429, 'metadata': {'headers': {'X-RateLimit-Limit': '50', 'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1776470400000'}, 'provider_name': None}}, 'user_id': 'user_3CK6YbC8lgHVA1mueJ8AR3V4qkh'}
+MISS done (1.7s)
+    expected: wizard watches through library  |  actual: 
+[26/50] id=00a77d86 ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 20.56
+[27/50] id=00c032a8 ... MISS done (0.0s)
+    expected: \^?  |  actual: 
+    type=equation_transform  nodes=1  retries=1
+    [OK] solve (llm) deps=(root) -> 
+    failures: 1
+      - solve_equation: cryptarithm puzzle (cryptarithm_deduce): skipping LLM fallback
+[28/50] id=00c8ab45 ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 23.75
+[29/50] id=00d1932c ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 12.48
+[30/50] id=00d8b3db ... MISS done (0.0s)
+    expected: 17/  |  actual: 17
+    type=equation_transform  nodes=1  retries=0
+    [OK] solve_equation (tool:solve_equation_transform) deps=(root) -> 17
+[31/50] id=00d9f682 ... MATCH done (0.0s)
+    type=numeral_conversion  nodes=1  retries=0
+    [OK] solve_numeral (tool:solve_numeral_conversion) deps=(root) -> C
+[32/50] id=00ec1c63 ... MATCH done (0.0s)
+    type=gravity_physics  nodes=1  retries=0
+    [OK] solve_gravity (tool:solve_gravity_physics) deps=(root) -> 7.66
+[33/50] id=00ed1836 ... MATCH done (0.0s)
+    type=gravity_physics  nodes=1  retries=0
+    [OK] solve_gravity (tool:solve_gravity_physics) deps=(root) -> 24.28
+[34/50] id=00efa37c ... ERROR: Error code: 429 - {'error': {'message': 'Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day', 'code': 429, 'metadata': {'headers': {'X-RateLimit-Limit': '50', 'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1776470400000'}, 'provider_name': None}}, 'user_id': 'user_3CK6YbC8lgHVA1mueJ8AR3V4qkh'}
+MISS done (1.7s)
+    expected: turtle watches the mysterious garden  |  actual: 
+[35/50] id=00fdc0be ... MATCH done (0.0s)
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 11111111
+[36/50] id=010055e2 ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 28.29
+[37/50] id=0106eb4a ... MATCH done (0.0s)
+    type=numeral_conversion  nodes=1  retries=0
+    [OK] solve_numeral (tool:solve_numeral_conversion) deps=(root) -> LXXXIV
+[38/50] id=0122d53a ... MATCH done (0.0s)
+    type=numeral_conversion  nodes=1  retries=0
+    [OK] solve_numeral (tool:solve_numeral_conversion) deps=(root) -> LI
+[39/50] id=01248b76 ... MISS done (0.0s)
+    expected: 11000101  |  actual: 10000101
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 10000101
+[40/50] id=012cab1f ... MISS done (0.0s)
+    expected: |@{  |  actual: 
+    type=equation_transform  nodes=1  retries=1
+    [OK] solve (llm) deps=(root) -> 
+    failures: 1
+      - solve_equation: cryptarithm puzzle (cryptarithm_deduce): skipping LLM fallback
+[41/50] id=012fb81b ... MISS done (0.0s)
+    expected: 10000100  |  actual: 10010001
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 10010001
+[42/50] id=0133bcec ... MATCH done (0.0s)
+    type=equation_transform  nodes=1  retries=0
+    [OK] solve_equation (tool:solve_equation_transform) deps=(root) -> \([#
+[43/50] id=0140788e ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 38.74
+[44/50] id=01466f0b ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 46.91
+[45/50] id=014c4f83 ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 54.29
+[46/50] id=014c7478 ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 66.59
+[47/50] id=015430cf ... MATCH done (0.0s)
+    type=numeral_conversion  nodes=1  retries=0
+    [OK] solve_numeral (tool:solve_numeral_conversion) deps=(root) -> LXXVII
+[48/50] id=0162e157 ... MATCH done (0.0s)
+    type=numeral_conversion  nodes=1  retries=0
+    [OK] solve_numeral (tool:solve_numeral_conversion) deps=(root) -> LII
+[49/50] id=016482c8 ... MATCH done (0.0s)
+    type=unit_conversion  nodes=1  retries=0
+    [OK] solve_unit (tool:solve_unit_conversion) deps=(root) -> 62.32
+[50/50] id=016c474c ... MATCH done (0.0s)
+    type=bit_manipulation  nodes=1  retries=0
+    [OK] solve_bits (tool:solve_bit_manipulation) deps=(root) -> 00000100
+
+Saved 50 predictions to results/predictions.csv
+Accuracy: 37/50 (74.0%)
