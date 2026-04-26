@@ -29,6 +29,21 @@ except Exception:
     pass
 
 
+FORBIDDEN_MONOLITHIC_TOOLS = {
+    "solve_bit_manipulation",
+    "solve_composite_bit_rule",
+    "solve_numeral_conversion",
+    "solve_cipher_decryption",
+    "solve_equation_transform",
+    "generate_bit_rule_candidates",
+    "select_bit_candidate",
+}
+
+
+def _uses_forbidden_monolith(text: str) -> bool:
+    return any(name in text for name in FORBIDDEN_MONOLITHIC_TOOLS)
+
+
 def _load_winners(path: str, min_reward: float, types: list[str] | None = None) -> list[dict]:
     """Read scored JSONL, keep best (valid, high-reward) candidate per puzzle.
 
@@ -50,7 +65,12 @@ def _load_winners(path: str, min_reward: float, types: list[str] | None = None) 
             except json.JSONDecodeError:
                 continue
 
-    winners = [r for r in records if r.get("dag_valid") and r.get("reward", 0) >= min_reward]
+    winners = [
+        r for r in records
+        if r.get("dag_valid")
+        and r.get("reward", 0) >= min_reward
+        and not _uses_forbidden_monolith(r.get("planner_output", ""))
+    ]
     if types:
         type_set = set(types)
         winners = [r for r in winners if r.get("puzzle_type") in type_set]
@@ -117,7 +137,7 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate (default: 2e-4)")
     parser.add_argument("--lora-r", type=int, default=16, help="LoRA rank (default: 16)")
     parser.add_argument("--lora-alpha", type=int, default=32, help="LoRA alpha (default: 32)")
-    parser.add_argument("--max-seq-len", type=int, default=2048, help="Max sequence length (default: 2048)")
+    parser.add_argument("--max-seq-len", type=int, default=4096, help="Max sequence length (default: 4096)")
     parser.add_argument("--min-reward", type=float, default=0.5,
                         help="Min reward to count as a winner (default: 0.5)")
     parser.add_argument("--types", nargs="*", default=None,

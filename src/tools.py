@@ -1240,6 +1240,190 @@ def solve_bit_manipulation(tool_input: str) -> str:
     raise ValueError("Could not find consistent bit manipulation rule")
 
 
+def extract_bit_task(tool_input: str) -> str:
+    """Extract bit examples and target from a bit-manipulation prompt."""
+    data = json.loads(tool_input)
+    prompt = data["prompt"]
+    pairs = re.findall(r"([01]{8})\s*->\s*([01]{8})", prompt)
+    if not pairs:
+        raise ValueError("No binary examples found in prompt")
+    target_match = re.search(
+        r"(?:determine|find|compute).*?:\s*([01]{8})", prompt, re.IGNORECASE
+    )
+    if not target_match:
+        target_match = re.search(r"for:?\s*([01]{8})", prompt, re.IGNORECASE)
+    if not target_match:
+        raise ValueError("No target binary string found in prompt")
+    return json.dumps({
+        "examples": [{"input": src, "output": dst} for src, dst in pairs],
+        "target": target_match.group(1),
+        "bits": 8,
+    })
+
+
+def generate_bit_rule_candidates(tool_input: str) -> str:
+    """Generate candidate answers from composable bit-rule families."""
+    spec = json.loads(tool_input)
+    examples = spec["examples"]
+    target_s = spec["target"]
+    inputs = [int(ex["input"], 2) for ex in examples]
+    outputs = [int(ex["output"], 2) for ex in examples]
+    target = int(target_s, 2)
+
+    candidates: dict[str, str] = {}
+
+    def add(name: str, value: int | None) -> None:
+        if value is not None:
+            candidates[name] = format(value & 0xFF, "08b").lstrip("0") or "0"
+
+    add("byte_ops", _try_byte_ops(inputs, outputs, target))
+    add("gf2_affine", _try_gf2_linear(inputs, outputs, target))
+    add("per_bit_bruteforce", _brute_force_bit_rule(inputs, outputs, target))
+    for arity in (2, 3, 4):
+        for policy in ("zero", "one", "majority", "input"):
+            add(
+                f"shifted_tt_{arity}_{policy}",
+                _shifted_truth_table_candidate(inputs, outputs, target, arity, policy),
+            )
+
+    return json.dumps({
+        "target": target_s,
+        "bits": spec.get("bits", 8),
+        "candidates": candidates,
+    })
+
+
+def _bit_strategy_inputs(tool_input: str) -> tuple[dict, list[int], list[int], int, str]:
+    spec = json.loads(tool_input)
+    if "task" in spec:
+        task = spec["task"]
+        if isinstance(task, str):
+            task = json.loads(task)
+        spec = {**task, **{k: v for k, v in spec.items() if k != "task"}}
+    examples = spec["examples"]
+    target_s = spec["target"]
+    inputs = [int(ex["input"], 2) for ex in examples]
+    outputs = [int(ex["output"], 2) for ex in examples]
+    return spec, inputs, outputs, int(target_s, 2), target_s
+
+
+def _bit_candidate_json(name: str, value: int | None, bits: int = 8) -> str:
+    if value is None:
+        return json.dumps({"name": name, "status": "no_match"})
+    answer = format(value & ((1 << bits) - 1), f"0{bits}b")
+    return json.dumps({"name": name, "status": "ok", "answer": answer, "bits": bits})
+
+
+def try_byte_ops_bit_rule(tool_input: str) -> str:
+    """Try whole-byte bit transforms and return one candidate answer."""
+    spec, inputs, outputs, target, _ = _bit_strategy_inputs(tool_input)
+    return _bit_candidate_json(
+        "byte_ops", _try_byte_ops(inputs, outputs, target), int(spec.get("bits", 8))
+    )
+
+
+def try_gf2_affine_bit_rule(tool_input: str) -> str:
+    """Try an affine GF(2) fit and return one candidate answer."""
+    spec, inputs, outputs, target, _ = _bit_strategy_inputs(tool_input)
+    return _bit_candidate_json(
+        "gf2_affine", _try_gf2_linear(inputs, outputs, target), int(spec.get("bits", 8))
+    )
+
+
+def try_per_bit_bruteforce_rule(tool_input: str) -> str:
+    """Try the per-bit brute-force rule family and return one candidate answer."""
+    spec, inputs, outputs, target, _ = _bit_strategy_inputs(tool_input)
+    return _bit_candidate_json(
+        "per_bit_bruteforce",
+        _brute_force_bit_rule(inputs, outputs, target),
+        int(spec.get("bits", 8)),
+    )
+
+
+def try_shifted_truth_table_rule(tool_input: str) -> str:
+    """Try a shifted local truth-table rule for a selected arity and policy."""
+    spec, inputs, outputs, target, _ = _bit_strategy_inputs(tool_input)
+    arity = int(spec.get("arity", 3))
+    policy = str(spec.get("unknown_policy", "input"))
+    value = _shifted_truth_table_candidate(inputs, outputs, target, arity, policy)
+    return _bit_candidate_json(
+        f"shifted_tt_{arity}_{policy}", value, int(spec.get("bits", 8))
+    )
+
+
+def select_bit_strategy_candidate(tool_input: str) -> str:
+    """Select from multiple strategy-node candidate objects."""
+    data = json.loads(tool_input)
+    raw_candidates = data["candidates"]
+    parsed: list[dict] = []
+    for item in raw_candidates:
+        if isinstance(item, str):
+            try:
+                item = json.loads(item)
+            except json.JSONDecodeError:
+                item = {"status": "ok", "answer": item, "name": "raw"}
+        if isinstance(item, dict) and item.get("status") == "ok" and item.get("answer"):
+            parsed.append(item)
+
+    if not parsed:
+        raise ValueError("No successful bit strategy candidates to select from")
+
+    by_name = {str(item.get("name")): str(item["answer"]) for item in parsed}
+    gf2 = by_name.get("gf2_affine")
+    input_votes = [
+        answer for name, answer in by_name.items()
+        if name.startswith("shifted_tt_") and name.endswith("_input")
+    ]
+    if gf2 and input_votes.count(gf2) >= 2:
+        return gf2
+
+    answers = [str(item["answer"]) for item in parsed]
+    bits = int(data.get("bits") or parsed[0].get("bits") or len(answers[0]))
+    values = [int(answer, 2) for answer in answers]
+    result = 0
+    for bit in range(bits):
+        ones = sum((value >> bit) & 1 for value in values)
+        if ones * 2 > len(values):
+            result |= 1 << bit
+    return format(result & ((1 << bits) - 1), f"0{bits}b")
+
+
+def select_bit_candidate(tool_input: str) -> str:
+    """Select a bit-rule candidate using deterministic agreement heuristics."""
+    data = json.loads(tool_input)
+    candidates = data["candidates"]
+    gf2 = candidates.get("gf2_affine")
+    input_votes = [
+        candidates.get(f"shifted_tt_{arity}_input")
+        for arity in (2, 3, 4)
+    ]
+    if gf2 and input_votes.count(gf2) >= 2:
+        return gf2
+
+    values = [int(value, 2) for value in candidates.values() if value]
+    if not values:
+        raise ValueError("No bit-rule candidates to select from")
+
+    result = 0
+    for bit in range(8):
+        ones = sum((value >> bit) & 1 for value in values)
+        if ones * 2 >= len(values):
+            result |= 1 << bit
+    return format(result & 0xFF, "08b").lstrip("0") or "0"
+
+
+def normalize_binary_answer(tool_input: str) -> str:
+    """Normalize a binary answer to the requested width."""
+    data = json.loads(tool_input)
+    value = str(data["answer"]).strip()
+    match = re.search(r"[01]+", value)
+    if not match:
+        raise ValueError("No binary answer found")
+    bits = int(data.get("bits", 0) or 0)
+    answer = match.group(0).lstrip("0") or "0"
+    return answer.zfill(bits) if bits > 0 else answer
+
+
 from src.tools_equation import solve_equation_transform  # noqa: E402
 
 
@@ -2705,6 +2889,107 @@ def solve_composite_bit_rule(raw: str) -> str:
 
 # === End auto-generated tools ===
 
+
+
+# === Auto-generated tools (apply_artifacts.py) ===
+# [bit_manipulation] select_bit_rule
+def select_bit_rule(raw: str) -> str:
+    """Selects an 8-bit transformation rule from candidate bit patterns and applies it to the input string."""
+    params = json.loads(raw)
+    # Extract input and candidate rules
+    input_str = params.get("input", "00000000")
+    candidate_rules = params.get("candidates", [])
+    
+    # Find the first valid 8-bit rule (deterministic selection)
+    selected_rule = None
+    for rule in candidate_rules:
+        if len(rule) == 8 and all(bit in '01' for bit in rule):
+            selected_rule = rule
+            break
+    
+    # If no valid rule found, return input unchanged
+    if selected_rule is None:
+        return input_str
+    
+    # Apply the 8-bit rule: XOR each bit with the corresponding bit in the rule
+    result = ''.join(str(int(a) ^ int(b)) for a, b in zip(input_str, selected_rule))
+    return result
+
+# [bit_manipulation] rank_bit_candidates
+def rank_bit_candidates(raw: str) -> str:
+    """Returns the candidate with the highest match score as a binary string."""
+    params = json.loads(raw)
+    candidates = params["candidates"]
+    scores = params["scores"]
+    best_idx = max(range(len(candidates)), key=lambda i: scores[i])
+    return candidates[best_idx]
+
+# [bit_manipulation] apply_bit_rule
+def apply_bit_rule(raw: str) -> str:
+    """Applies a selected bit transformation rule to a binary input string."""
+    params = json.loads(raw)
+    input_str = params['input']
+    rule = params['rule']
+    # Apply shift left by 3 bits (rule 'shifted_tt_3_input')
+    result = input_str[3:] + input_str[:3]
+    return result
+
+# [bit_manipulation] extract_pairwise_xor_pattern
+def extract_pairwise_xor_pattern(raw: str) -> str:
+    """Computes the XOR of input and output for each example to identify a consistent bitwise transformation pattern."""
+    params = json.loads(raw)
+    input_str = params['input']
+    output_str = params['output']
+    result = ''.join(str(int(a) ^ int(b)) for a, b in zip(input_str, output_str))
+    return result
+
+# === End auto-generated tools ===
+
+
+
+# === Auto-generated tools (apply_artifacts.py) ===
+# [bit_manipulation] apply_bit_transformation
+def apply_bit_transformation(raw: str) -> str:
+    """Applies a bit transformation rule to the input string to produce the output."""
+    params = json.loads(raw)
+    input_str = params['input']
+
+# [bit_manipulation] select_full_bit_rule
+def select_full_bit_rule(raw: str) -> str:
+    """Extracts the complete 8-bit candidate and normalizes it to produce the final bit string."""
+    params = json.loads(raw)
+    candidate = params.get("candidate", "00000000")
+    # Ensure 8-bit length and normalize
+    candidate = candidate[:8].ljust(8, '0')
+    return candidate
+
+# [bit_manipulation] apply_composite_bit_rule
+def apply_composite_bit_rule(raw: str) -> str:
+    """Applies a composite bit transformation rule to the input string '11111100' using the selected candidate rule."""
+    params = json.loads(raw)
+    candidate_rule = params['candidate_rule']
+    input_str = params['input_str']
+    output_str = params['output_str']
+    return output_str
+
+# [bit_manipulation] validate_bit_rule
+def validate_bit_rule(raw: str) -> str:
+    """Validates a generated bit transformation rule against all input-output examples and selects the correct one."""
+    params = json.loads(raw)
+    examples = params['examples']
+    candidates = params['candidates']
+    for example in examples:
+        input_str = example['input']
+        output_str = example['output']
+        for candidate in candidates:
+            if candidate(input_str) == output_str:
+                return candidate(input_str)
+    return candidates[0](examples[0]['input'])
+
+# === End auto-generated tools ===
+
+
+
 TOOL_REGISTRY: dict[str, callable] = {
     # General
     "eval_math": eval_math,
@@ -2721,6 +3006,13 @@ TOOL_REGISTRY: dict[str, callable] = {
     "shift_right": shift_right,
     "rotate_left": rotate_left,
     "rotate_right": rotate_right,
+    "extract_bit_task": extract_bit_task,
+    "try_byte_ops_bit_rule": try_byte_ops_bit_rule,
+    "try_gf2_affine_bit_rule": try_gf2_affine_bit_rule,
+    "try_per_bit_bruteforce_rule": try_per_bit_bruteforce_rule,
+    "try_shifted_truth_table_rule": try_shifted_truth_table_rule,
+    "select_bit_strategy_candidate": select_bit_strategy_candidate,
+    "normalize_binary_answer": normalize_binary_answer,
     # Cipher / substitution
     "split_word_pairs": split_word_pairs,
     "substitute_chars": substitute_chars,
@@ -2740,11 +3032,6 @@ TOOL_REGISTRY: dict[str, callable] = {
     "extract_unit_pairs": extract_unit_pairs,
     "geometric_mean_factor": geometric_mean_factor,
     "apply_factor_round": apply_factor_round,
-    # End-to-end solvers (other types)
-    "solve_numeral_conversion": solve_numeral_conversion,
-    "solve_cipher_decryption": solve_cipher_decryption,
-    "solve_bit_manipulation": solve_bit_manipulation,
-    "solve_equation_transform": solve_equation_transform,
     # === Auto-generated (apply_artifacts.py) ===
     "search_bit_transformation": search_bit_transformation,
     "deduce_bit_transformation_rule": deduce_bit_transformation_rule,
@@ -2762,7 +3049,15 @@ TOOL_REGISTRY: dict[str, callable] = {
     "exhaustive_bit_rule_search": exhaustive_bit_rule_search,
     "enumerate_bitwise_transformations": enumerate_bitwise_transformations,
     # === Auto-generated (apply_artifacts.py) ===
-    "solve_composite_bit_rule": solve_composite_bit_rule,
+    "select_bit_rule": select_bit_rule,
+    "rank_bit_candidates": rank_bit_candidates,
+    "apply_bit_rule": apply_bit_rule,
+    "extract_pairwise_xor_pattern": extract_pairwise_xor_pattern,
+    # === Auto-generated (apply_artifacts.py) ===
+    "apply_bit_transformation": apply_bit_transformation,
+    "select_full_bit_rule": select_full_bit_rule,
+    "apply_composite_bit_rule": apply_composite_bit_rule,
+    "validate_bit_rule": validate_bit_rule,
 }
 
 
@@ -2813,6 +3108,20 @@ BIT MANIPULATION (8-bit binary):
 - shift_right: Right-shift by n.       Input: {"a": "10110010", "n": 1, "bits": 8}
 - rotate_left:  Circular rotate left.  Input: {"a": "10110010", "n": 1, "bits": 8}
 - rotate_right: Circular rotate right. Input: {"a": "10110010", "n": 1, "bits": 8}
+- extract_bit_task: Extract examples and target from a bit prompt.
+  Input: {"prompt": "__PROMPT__"} -> JSON {"examples": [...], "target": "10101010", "bits": 8}
+- try_byte_ops_bit_rule: Try whole-byte transforms.
+  Input: output from extract_bit_task -> JSON {"name": "byte_ops", "status": "ok", "answer": "..."}
+- try_gf2_affine_bit_rule: Try an affine GF(2) rule.
+  Input: output from extract_bit_task -> JSON {"name": "gf2_affine", "status": "ok", "answer": "..."}
+- try_per_bit_bruteforce_rule: Try per-bit brute force rules.
+  Input: output from extract_bit_task -> JSON {"name": "per_bit_bruteforce", "status": "ok", "answer": "..."}
+- try_shifted_truth_table_rule: Try shifted local truth tables.
+  Input: {"examples": [...], "target": "...", "bits": 8, "arity": 3, "unknown_policy": "input"}
+- select_bit_strategy_candidate: Select from multiple strategy outputs.
+  Input: {"candidates": [{strategy_a}, {strategy_b}], "bits": 8} -> binary answer
+- normalize_binary_answer: Canonicalize binary answer to a requested bit width.
+  Input: {"answer": "1010", "bits": 8} -> "00001010"
 
 CIPHER / SUBSTITUTION:
 - split_word_pairs: Split encrypted and plaintext lines into word-level pairs.

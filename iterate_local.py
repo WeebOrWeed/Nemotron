@@ -66,6 +66,29 @@ KAGGLE_OUT = os.path.join(HERE, "kaggle_output")
 SCORES_PATH = os.path.join(KAGGLE_OUT, "planner_scores.jsonl")
 TOOLS_GEN_PATH = os.path.join(KAGGLE_OUT, "tools_generated.py")
 ANALYSIS_PATH = os.path.join(KAGGLE_OUT, "failure_analysis.json")
+FORBIDDEN_MONOLITHIC_TOOLS = {
+    "solve_bit_manipulation",
+    "solve_composite_bit_rule",
+    "solve_numeral_conversion",
+    "solve_cipher_decryption",
+    "solve_equation_transform",
+    "generate_bit_rule_candidates",
+    "select_bit_candidate",
+}
+BIT_TOOL_PREFIX_ALLOWLIST = (
+    "extract_",
+    "try_",
+    "score_",
+    "rank_",
+    "select_",
+    "apply_",
+    "normalize_",
+    "validate_",
+)
+
+
+def _has_forbidden_monolith(dag) -> bool:
+    return any((node.get("tool") or "") in FORBIDDEN_MONOLITHIC_TOOLS for node in dag or [])
 
 
 # ─── Phase 1: Data collection ──────────────────────────────────────────
@@ -141,9 +164,29 @@ def _generate_candidate(planner_llm, puzzle_type, prompt, temperature):
         return "", None
     try:
         edges, nodes_dict = _parse_planner_output(raw)
-        return raw, _build_dag(edges, nodes_dict, prompt)
+        dag = _build_dag(edges, nodes_dict, prompt)
+        if _has_forbidden_monolith(dag):
+            return raw, None
+        return raw, dag
     except Exception:
         return raw, None
+
+
+COMPOSABLE_BIT_PLANNER_OUTPUT = r"""MERMAID:
+START --> extract_bits
+extract_bits --> gen_candidates
+gen_candidates --> select_bits
+select_bits --> normalize_bits
+extract_bits --> normalize_bits
+normalize_bits --> END
+
+NODES:
+{"extract_bits": {"id": "extract_bits", "question": "Extract bit examples and target from the prompt.", "tool": "extract_bit_task", "tool_input": "{\"prompt\": \"__PROMPT__\"}"}, "gen_candidates": {"id": "gen_candidates", "question": "Generate candidate bit-rule predictions from the extracted examples.", "tool": "generate_bit_rule_candidates", "tool_input": "{extract_bits}"}, "select_bits": {"id": "select_bits", "question": "Select the most reliable candidate answer.", "tool": "select_bit_candidate", "tool_input": "{gen_candidates}"}, "normalize_bits": {"id": "normalize_bits", "question": "Normalize the selected binary answer.", "tool": "normalize_binary_answer", "tool_input": "{\"answer\": \"{select_bits}\", \"bits\": \"{extract_bits_bits}\"}"}}"""
+
+
+def _generate_forced_composable_bit_plan(prompt: str):
+    edges, nodes_dict = _parse_planner_output(COMPOSABLE_BIT_PLANNER_OUTPUT)
+    return COMPOSABLE_BIT_PLANNER_OUTPUT, _build_dag(edges, nodes_dict, prompt)
 
 
 def phase1_collect(args, planner_llm, exec_llm) -> list[dict]:
@@ -177,7 +220,10 @@ def phase1_collect(args, planner_llm, exec_llm) -> list[dict]:
 
         for ci, temp in enumerate(temps):
             t0 = time.time()
-            raw_plan, dag = _generate_candidate(planner_llm, puzzle_type, prompt, temp)
+            if args.force_composable_bit_plan and puzzle_type == "bit_manipulation":
+                raw_plan, dag = _generate_forced_composable_bit_plan(prompt)
+            else:
+                raw_plan, dag = _generate_candidate(planner_llm, puzzle_type, prompt, temp)
             dag_valid = dag is not None
             got, trace = "", []
             if dag_valid:
@@ -250,6 +296,14 @@ Classify the root cause as ONE of:
 If fix_type is NEW_TOOL, the new_tool_name MUST be a fresh snake_case name
 NOT in the list above. Be specific (e.g. "extract_pairwise_xor_pattern",
 not "solve_bit_manipulation").
+
+ARCHITECTURE RULE:
+- Never propose or repair a type-specific end-to-end solver, especially any
+  tool named solve_*.
+- New tools must be small DAG steps such as extract_*, generate_*,
+  score_*, rank_*, select_*, apply_*, or normalize_*.
+- If a failure was caused by a monolithic solve_* node, classify it as BAD_PLAN
+  and propose replacing it with composable nodes.
 
 Output STRICT JSON only (no commentary):
 {{
@@ -369,6 +423,9 @@ STRICT REQUIREMENTS:
 6. Only use standard library imports (json, math, re, itertools, etc.)
 7. Include a one-line docstring
 8. Implement REAL logic. Do NOT return a placeholder or hardcoded answer.
+9. For bit_manipulation, the function must be a composable step named with
+   one of these prefixes: extract_, try_, score_, rank_, select_, apply_,
+   normalize_, validate_. Do NOT use broad names like infer_complex_bit_rule.
 
 Output format -- output EXACTLY this, nothing else:
 
@@ -450,6 +507,12 @@ def phase3_generate_tools(analyses, llm, max_tools=15) -> list[dict]:
                 print("  SKIP: no function found in generated code")
                 continue
             actual_fn_name = fn_match.group(1)
+            if actual_fn_name in FORBIDDEN_MONOLITHIC_TOOLS or actual_fn_name.startswith("solve_"):
+                print(f"  SKIP {actual_fn_name}: type-specific monolithic/fixed solver names are forbidden")
+                continue
+            if a["puzzle_type"] == "bit_manipulation" and not actual_fn_name.startswith(BIT_TOOL_PREFIX_ALLOWLIST):
+                print(f"  SKIP {actual_fn_name}: bit tools must be composable strategy-step names")
+                continue
             if hasattr(tools_module, actual_fn_name):
                 print(f"  SKIP {actual_fn_name}: already exists in tools.py")
                 continue
@@ -597,6 +660,8 @@ def main() -> None:
                         help="Don't update src/tools.py and src/planner.py")
     parser.add_argument("--skip-train", action="store_true",
                         help="Don't run train_lora.py at the end")
+    parser.add_argument("--force-composable-bit-plan", action="store_true",
+                        help="For bit_manipulation, collect data with the enforced composable DAG instead of calling the planner")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -606,6 +671,7 @@ def main() -> None:
     print(f"  candidates  = {args.n}")
     print(f"  planner_llm = {args.planner_llm}")
     print(f"  analyzer_llm= {args.analyzer_llm}")
+    print(f"  force_bit   = {args.force_composable_bit_plan}")
     print("=" * 60)
 
     def _build(provider: str) -> LLMClient:

@@ -61,9 +61,11 @@ N2  id=compute_factor  tool=geometric_mean_factor   depends on N1
 N3  id=predict         tool=apply_factor_round      depends on N1, N2
     tool_input = {"factor": "{compute_factor}", "target": "{extract_pairs_target}"}
 
-=== numeral_conversion (1 node) ===
-N1  id=solve_numeral   tool=solve_numeral_conversion
-    tool_input = {"prompt": "__PROMPT__"}
+=== numeral_conversion (2 nodes) ===
+N1  id=detect_system   tool=detect_numeral_system
+    tool_input = {"pairs": [[<decimal_from_example_1>, "<notation_from_example_1>"], ...]}
+N2  id=convert_target  tool=convert_numeral        depends on N1
+    tool_input = {"number": <target_decimal>, "system": "{detect_system_system}"}
 
 === cipher_decryption (2*N + 2 nodes) ===
 For EACH example line i (i = 1..N) in the prompt:
@@ -78,63 +80,89 @@ Then two final nodes:
           tool_input = {"ciphertext": "<target ciphertext>", "mapping": {merge_mapping}}
 Read the actual encrypted/plain/ciphertext from the PROMPT.
 
-=== bit_manipulation (1 node) ===
-N1  id=solve_bits      tool=solve_bit_manipulation
-    tool_input = {"prompt": "__PROMPT__"}
+=== bit_manipulation (variable strategy DAG, 5+ nodes) ===
+Always start by extracting the bit task, then choose MULTIPLE independent
+strategy nodes. Do not collapse the strategies into one generator node.
 
-=== equation_transform (1 node) ===
-N1  id=solve_equation  tool=solve_equation_transform
-    tool_input = {"prompt": "__PROMPT__"}
+Required root:
+  id=extract_bits      tool=extract_bit_task
+      tool_input = {"prompt": "__PROMPT__"}
+
+Available strategy nodes (choose 2-6 based on the prompt):
+  id=try_byte          tool=try_byte_ops_bit_rule           depends on extract_bits
+      tool_input = {extract_bits}
+  id=try_gf2           tool=try_gf2_affine_bit_rule         depends on extract_bits
+      tool_input = {extract_bits}
+  id=try_bruteforce    tool=try_per_bit_bruteforce_rule     depends on extract_bits
+      tool_input = {extract_bits}
+  id=try_tt3_input     tool=try_shifted_truth_table_rule    depends on extract_bits
+      tool_input = {"task": {extract_bits}, "arity": 3, "unknown_policy": "input"}
+  id=try_tt2_majority  tool=try_shifted_truth_table_rule    depends on extract_bits
+      tool_input = {"task": {extract_bits}, "arity": 2, "unknown_policy": "majority"}
+  id=try_tt4_input     tool=try_shifted_truth_table_rule    depends on extract_bits
+      tool_input = {"task": {extract_bits}, "arity": 4, "unknown_policy": "input"}
+
+Required final nodes:
+  id=select_bits       tool=select_bit_strategy_candidate   depends on ALL chosen strategy nodes and extract_bits
+      tool_input = {"candidates": [{try_byte}, {try_gf2}, ...], "bits": "{extract_bits_bits}"}
+  id=normalize_bits    tool=normalize_binary_answer         depends on select_bits and extract_bits
+      tool_input = {"answer": "{select_bits}", "bits": "{extract_bits_bits}"}
+
+=== equation_transform (1 node, no deterministic type solver) ===
+N1  id=solve_equation  tool=ask_llm
+    tool_input = "1"
 
 
-=== bit_manipulation (reward=1.0) ===
+=== bit_manipulation (variable strategy example, reward=1.0) ===
 Input: PUZZLE_TYPE: bit_manipulation
 Output:
 MERMAID:
-START --> solve_bits
-solve_bits --> END
+START --> extract_bits
+extract_bits --> try_byte
+extract_bits --> try_gf2
+extract_bits --> try_tt3_input
+try_byte --> select_bits
+try_gf2 --> select_bits
+try_tt3_input --> select_bits
+extract_bits --> select_bits
+select_bits --> normalize_bits
+extract_bits --> normalize_bits
+normalize_bits --> END
 
 NODES:
-{"solve_bits": {"id": "solve_bits", "question": "Solve the bit manipulation puzzle by analyzing examples and applying the rule to the target input.", "tool": "solve_bit_manipulation", "tool_input": "{\"prompt\": \"__PROMPT__\"}"}}
+{"extract_bits": {"id": "extract_bits", "question": "Extract bit examples and target from the prompt.", "tool": "extract_bit_task", "tool_input": "{\"prompt\": \"__PROMPT__\"}"}, "try_byte": {"id": "try_byte", "question": "Try whole-byte transformations on the extracted examples.", "tool": "try_byte_ops_bit_rule", "tool_input": "{extract_bits}"}, "try_gf2": {"id": "try_gf2", "question": "Try an affine GF(2) transformation.", "tool": "try_gf2_affine_bit_rule", "tool_input": "{extract_bits}"}, "try_tt3_input": {"id": "try_tt3_input", "question": "Try a shifted arity-3 truth table with input fallback.", "tool": "try_shifted_truth_table_rule", "tool_input": "{\"task\": {extract_bits}, \"arity\": 3, \"unknown_policy\": \"input\"}"}, "select_bits": {"id": "select_bits", "question": "Select the best answer from the independent strategy candidates.", "tool": "select_bit_strategy_candidate", "tool_input": "{\"candidates\": [{try_byte}, {try_gf2}, {try_tt3_input}], \"bits\": \"{extract_bits_bits}\"}"}, "normalize_bits": {"id": "normalize_bits", "question": "Normalize the selected binary answer.", "tool": "normalize_binary_answer", "tool_input": "{\"answer\": \"{select_bits}\", \"bits\": \"{extract_bits_bits}\"}"}}
 
 
-=== bit_manipulation (reward=1.0) ===
+=== bit_manipulation (variable strategy example, reward=1.0) ===
 Input: PUZZLE_TYPE: bit_manipulation
 Output:
 MERMAID:
-START --> solve_bits
-solve_bits --> END
+START --> extract_bits
+extract_bits --> try_gf2
+extract_bits --> try_bruteforce
+extract_bits --> try_tt2_majority
+extract_bits --> try_tt4_input
+try_gf2 --> select_bits
+try_bruteforce --> select_bits
+try_tt2_majority --> select_bits
+try_tt4_input --> select_bits
+extract_bits --> select_bits
+select_bits --> normalize_bits
+extract_bits --> normalize_bits
+normalize_bits --> END
 
 NODES:
-{"solve_bits": {"id": "solve_bits", "question": "Solve the bit manipulation puzzle by analyzing examples and applying the rule to the target input.", "tool": "solve_bit_manipulation", "tool_input": "{\"prompt\": \"__PROMPT__\"}"}}
+{"extract_bits": {"id": "extract_bits", "question": "Extract bit examples and target from the prompt.", "tool": "extract_bit_task", "tool_input": "{\"prompt\": \"__PROMPT__\"}"}, "try_gf2": {"id": "try_gf2", "question": "Try an affine GF(2) transformation.", "tool": "try_gf2_affine_bit_rule", "tool_input": "{extract_bits}"}, "try_bruteforce": {"id": "try_bruteforce", "question": "Try per-bit brute-force rules.", "tool": "try_per_bit_bruteforce_rule", "tool_input": "{extract_bits}"}, "try_tt2_majority": {"id": "try_tt2_majority", "question": "Try a shifted arity-2 truth table with majority fallback.", "tool": "try_shifted_truth_table_rule", "tool_input": "{\"task\": {extract_bits}, \"arity\": 2, \"unknown_policy\": \"majority\"}"}, "try_tt4_input": {"id": "try_tt4_input", "question": "Try a shifted arity-4 truth table with input fallback.", "tool": "try_shifted_truth_table_rule", "tool_input": "{\"task\": {extract_bits}, \"arity\": 4, \"unknown_policy\": \"input\"}"}, "select_bits": {"id": "select_bits", "question": "Select the best answer from the independent strategy candidates.", "tool": "select_bit_strategy_candidate", "tool_input": "{\"candidates\": [{try_gf2}, {try_bruteforce}, {try_tt2_majority}, {try_tt4_input}], \"bits\": \"{extract_bits_bits}\"}"}, "normalize_bits": {"id": "normalize_bits", "question": "Normalize the selected binary answer.", "tool": "normalize_binary_answer", "tool_input": "{\"answer\": \"{select_bits}\", \"bits\": \"{extract_bits_bits}\"}"}}
 
 
-=== bit_manipulation (reward=1.0) ===
-Input: PUZZLE_TYPE: bit_manipulation
-Output:
-MERMAID:
-START --> solve_bits
-solve_bits --> END
-
-NODES:
-{"solve_bits": {"id": "solve_bits", "question": "Solve the bit manipulation puzzle by analyzing examples and applying the rule to the target input.", "tool": "solve_bit_manipulation", "tool_input": "{\"prompt\": \"__PROMPT__\"}"}}
-
-
-FEW-SHOT EXAMPLES OF CORRECT PLANS:
-
-=== bit_manipulation (reward=1.0) ===
-Input: PUZZLE_TYPE: bit_manipulation
-Output:
-MERMAID:
-START --> solve_bits
-solve_bits --> END
-
-NODES:
-{"solve_bits": {"id": "solve_bits", "question": "Solve the bit manipulation puzzle by analyzing examples and applying the rule to the target input.", "tool": "solve_bit_manipulation", "tool_input": "{\"prompt\": \"__PROMPT__\"}"}}
 
 RULES:
 - Match the plan to PUZZLE_TYPE exactly.
-- Use the EXACT tool names and node IDs shown above.
+- Use exact tool names from the catalogue. For bit_manipulation, choose a
+  variable set of independent strategy nodes; do not always emit the same DAG.
+- Never use type-specific deterministic solver tools such as solve_bit_manipulation,
+  solve_composite_bit_rule, solve_numeral_conversion, solve_cipher_decryption, or
+  solve_equation_transform. Plans must be composed from smaller strategy tools or ask_llm.
 - Output ONLY MERMAID and NODES sections — no commentary.\
 """
 
@@ -146,6 +174,16 @@ KNOWN_TYPES = frozenset({
     "cipher_decryption",
     "bit_manipulation",
     "equation_transform",
+})
+
+FORBIDDEN_MONOLITHIC_TOOLS = frozenset({
+    "solve_bit_manipulation",
+    "solve_composite_bit_rule",
+    "solve_numeral_conversion",
+    "solve_cipher_decryption",
+    "solve_equation_transform",
+    "generate_bit_rule_candidates",
+    "select_bit_candidate",
 })
 
 
@@ -327,6 +365,9 @@ def _build_dag(
     dag: list[ThoughtNode] = []
     for nk in ordered:
         node = nodes_dict[nk]
+        tool_name = node.get("tool")
+        if tool_name in FORBIDDEN_MONOLITHIC_TOOLS:
+            raise ValueError(f"Forbidden monolithic tool in DAG: {tool_name}")
         depends_on = [
             nkey_to_id[p] for p in parent_map[nk] if p in nkey_to_id
         ]
@@ -338,7 +379,7 @@ def _build_dag(
             id=node["id"],
             question=node.get("question", ""),
             depends_on=depends_on,
-            tool=node.get("tool"),
+            tool=tool_name,
             tool_input=tool_input,
             answer=None,
         ))

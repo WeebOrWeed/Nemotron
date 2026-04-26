@@ -48,11 +48,11 @@ each in the training set).
 
 | Type                 | Signature phrase                              | Task                                          |
 |----------------------|-----------------------------------------------|-----------------------------------------------|
-| `bit_manipulation`   | "bit manipulation"                            | LLM plans DAG → `solve_bit_manipulation` (brute-force per-bit boolean function search) |
+| `bit_manipulation`   | "bit manipulation"                            | LLM plans a variable strategy DAG: `extract_bit_task` → multiple independent `try_*_bit_rule` nodes → `select_bit_strategy_candidate` → `normalize_binary_answer` |
 | `cipher_decryption`  | "encryption rules"                            | LLM plans DAG → N parallel [split_word_pairs → build_char_map] → merge_char_maps → decrypt_substitution |
-| `equation_transform` | "transformation rules"                        | LLM plans DAG → `solve_equation_transform` (operator-centric compound-operation search) |
+| `equation_transform` | "transformation rules"                        | LLM plans DAG → `ask_llm` (no deterministic type-specific solver in planner-facing registry) |
 | `gravity_physics`    | "gravitational constant"                      | LLM plans DAG → extract_gravity_obs → compute_gravity_g → compute_gravity_d |
-| `numeral_conversion` | "numeral system"                              | LLM plans DAG → `solve_numeral_conversion` (detect Roman numerals, convert) |
+| `numeral_conversion` | "numeral system"                              | LLM plans DAG → `detect_numeral_system` → `convert_numeral` |
 | `unit_conversion`    | "unit conversion"                             | LLM plans DAG → extract_unit_pairs → geometric_mean_factor → apply_factor_round |
 
 ## DAG-of-Thoughts
@@ -90,10 +90,10 @@ passed as an intent parameter so the LLM selects the correct plan.
 |----------------------|---------------------------------------------------------------------|
 | `gravity_physics`    | 3 nodes: `extract_gravity_obs` → `compute_gravity_g` (weighted LS) → `compute_gravity_d` |
 | `unit_conversion`    | 3 nodes: `extract_unit_pairs` → `geometric_mean_factor` → `apply_factor_round` |
-| `numeral_conversion` | Single node: `solve_numeral_conversion` — detect Roman numerals, convert target |
+| `numeral_conversion` | 2 nodes: `detect_numeral_system` → `convert_numeral` |
 | `cipher_decryption`  | N parallel [split_word_pairs → build_char_map] → merge_char_maps → decrypt_substitution |
-| `bit_manipulation`   | Single node: `solve_bit_manipulation` — brute-force per-bit boolean function search |
-| `equation_transform` | Single node: `solve_equation_transform` — operator-centric compound-operation search |
+| `bit_manipulation`   | Variable strategy DAG: `extract_bit_task` → 2-6 independent strategy nodes (`try_byte_ops_bit_rule`, `try_gf2_affine_bit_rule`, `try_shifted_truth_table_rule`, etc.) → `select_bit_strategy_candidate` → `normalize_binary_answer` |
+| `equation_transform` | 1 LLM node: `ask_llm`; deterministic `solve_equation_transform` is not planner-facing |
 
 If a solver node fails, the graph routes back to `decompose` for LLM retry.
 
@@ -250,6 +250,7 @@ Nemotron/
 ├── trace_row.py            # Run one train id, print each DAG step I/O
 ├── train_planner.py        # RL scoring harness: N candidate DAGs per puzzle → JSONL
 ├── train_lora.py           # Local QLoRA SFT on winning DAGs (uses kaggle_output JSONL)
+├── train_bit_selector.py   # Batch evaluator/trainer for bit_manipulation selector candidates
 ├── apply_artifacts.py      # Merge kaggle_output/ tools + few-shots into src/tools.py + src/planner.py
 ├── iterate_local.py        # End-to-end local RL loop: collect → analyze → gen tools → apply → retrain
 ├── kaggle_output/          # Pulled artifacts: tools_generated.py, failure_analysis.json, planner_scores.jsonl
@@ -268,6 +269,7 @@ Nemotron/
 ├── data/
 │   ├── train.csv           # Kaggle train set (id, prompt, answer)
 │   ├── test.csv            # Kaggle test set  (id, prompt)
+│   ├── bit_manipulation_200.csv # 200-row bit_manipulation fixture (rows 160..359)
 │   ├── gravity_20.csv      # Optional: first 20 gravity_physics rows from train
 │   ├── unit_20.csv         # Optional: first 20 unit_conversion rows from train
 │   └── planner_scores.jsonl # RL harness output: scored DAG candidates
@@ -477,6 +479,9 @@ When `PLANNER_PROVIDER=hf_lora`, the planner loads the local PEFT adapter from
 lazy-loaded on the first planner call, uses 4-bit loading by default
 (`HF_PLANNER_LOAD_4BIT=1`), and caps generation with
 `HF_PLANNER_MAX_NEW_TOKENS` (default `192`) because planner DAGs are short.
+Multi-node DAGs must emit the complete MERMAID and NODES sections; the old
+single-tool stopping shortcut was removed after the bit planner moved away
+from one-node `solve_*` outputs.
 This path is useful for validating the trained adapter, but current
 bit-manipulation accuracy is still bound by the deterministic bit solver rather
 than the planner shape.
@@ -512,6 +517,8 @@ Kaggle. The flow is:
      `Qwen/Qwen2.5-7B-Instruct` for 24 GB+ GPUs) with 4-bit QLoRA.
    - Trains a LoRA adapter (rank 16, alpha 32, all attention + MLP projections)
      and saves it under `models/planner-lora/`.
+   - Uses a 4096-token default sequence length so the composable planner prompt
+     and full bit DAG examples are not truncated at 2048 tokens.
 
    ```bash
    pip install -r requirements.txt   # installs torch/trl/peft/bitsandbytes
@@ -564,6 +571,9 @@ independently with `--planner-llm` and `--analyzer-llm`
 # Full cycle on bit_manipulation, 30 puzzles × 2 candidates, retrain 3 epochs
 python iterate_local.py --types bit_manipulation --limit 30 --n 2 --epochs 3
 
+# 50-row variable-DAG bit sample
+python iterate_local.py --types bit_manipulation --limit 50 --n 1 --epochs 1
+
 # Iterate over a fresh slice so the planner doesn't keep training on
 # the same puzzles (held-out test was rows 30..79 of bit_manipulation)
 python iterate_local.py --types bit_manipulation --offset 80 --limit 30
@@ -578,9 +588,24 @@ tool is "missing". When the analyzer suggests `NEW_TOOL` with a name that
 is already registered, the orchestrator auto-downgrades the proposal to
 `FIX_TOOL` to avoid wasting Phase 3 on duplicate generations.
 
+**Avoid fixed bit collection:** `--force-composable-bit-plan` is retained only
+for controlled experiments and should not be used for normal RL data. Standard
+bit training lets the planner choose a variable set of independent strategy
+nodes so SFT examples do not collapse back into one fixed topology.
+
 **Phase 3 robustness:** the tool-generation prompt is also templated with
 the existing tool names as a forbidden list, so a new function cannot
 shadow an existing one.
+
+**Monolithic/fixed-pipeline guardrail:** `solve_bit_manipulation`,
+`solve_composite_bit_rule`, `solve_numeral_conversion`,
+`solve_cipher_decryption`, `solve_equation_transform`, `generate_bit_rule_candidates`,
+and `select_bit_candidate` are rejected by `_build_dag` if a planner output
+tries to use them. `iterate_local.py`, `apply_artifacts.py`, and `train_lora.py`
+also filter those names so RL data cannot train the adapter back toward
+type-specific deterministic black boxes or the fixed four-node bit pipeline.
+New generated bit tools must be composable steps such as `extract_*`, `try_*`,
+`score_*`, `rank_*`, `select_*`, `apply_*`, or `normalize_*`.
 
 **`apply_artifacts.py` is append-only.** Earlier versions stripped and
 re-wrote the auto-generated block on every run; that turned out to be
@@ -591,10 +616,23 @@ that aren't already in the file.
 
 ### Bit-Manipulation Solver Notes
 
-`solve_bit_manipulation` is the dominant accuracy bottleneck for the
-`bit_manipulation` slice because the planner reliably emits the same one-node
-DAG (`solve_bit_manipulation` with the full prompt). The solver now uses a
-small deterministic ensemble:
+The previous `solve_bit_manipulation` one-node plan and the later fixed
+four-node `generate_bit_rule_candidates` pipeline were removed from the
+planner-facing path because both hid strategy search from RL. The bit plan is
+now variable:
+
+```text
+extract_bit_task
+  -> try_byte_ops_bit_rule
+  -> try_gf2_affine_bit_rule
+  -> try_shifted_truth_table_rule
+  -> ... planner-chosen additional try_* nodes
+  -> select_bit_strategy_candidate
+  -> normalize_binary_answer
+```
+
+Each strategy node returns one candidate object, and `select_bit_strategy_candidate`
+combines the planner-chosen candidates. The current candidate set includes:
 
 1. Whole-byte transforms (`_try_byte_ops`).
 2. GF(2)-affine fitting.
@@ -605,8 +643,8 @@ small deterministic ensemble:
    two shifted `input`-policy candidates.
 6. Per-bit majority voting across the candidate outputs.
 
-The final output is canonical binary without leading zeros (`"0"` for zero),
-matching the answer formatting observed in the held-out fixture. On the local
+The final output is normalized back to the detected bit width so labelled
+8-bit answers keep their leading zeros. On the local
 50-row held-out `bit_manipulation` fixture this raised exact end-to-end
 accuracy from 26/50 (52%) to 37/50 (74%) with the Ollama planner. A lightweight
 training-derived weighted selector over another labeled slice did not improve
@@ -614,6 +652,24 @@ over the unweighted ensemble (35/50), and broader independent per-bit /
 parametric boolean-function families did not produce enough new correct
 candidates to reach 85%. The remaining failures need genuinely new rule
 families or a stronger learned selector.
+
+A larger 200-row fixture (`data/bit_manipulation_200.csv`, rows 160..359 of
+the `bit_manipulation` slice) currently scores 133/200 (66.5%) with the same
+solver. Expanding the candidate families with independent 2-input boolean
+rules and low-degree GF(2) polynomial fits raises the candidate oracle to
+182/200 (91.0%), but simple voting/weighted selectors do not approach that
+oracle (best compact selector observed: 149/200, 74.5%). A RandomForest
+selector can memorize the 200 rows, but 5-fold exact-answer CV is only about
+67%, so it is not promoted as a real solver improvement.
+
+`train_bit_selector.py` extends this analysis to the full `bit_manipulation`
+slice in 200-row batches. On all 1602 labelled rows, the current solver scores
+486/1602 (30.3%), the current candidate-family oracle is only 634/1602
+(39.6%), and the best simple selector over those families reaches 523/1602
+(32.6%). This shows that batching over all available rows is not enough by
+itself: most of the full distribution is outside the current rule-family
+coverage, so reaching 90% requires adding new candidate rule families rather
+than merely training a better selector over the existing candidates.
 
 ## Discussion
 

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -192,7 +191,6 @@ class LLMClient:
             self._load_hf_lora()
 
             import torch
-            from transformers import StoppingCriteria, StoppingCriteriaList
 
             tokenizer = self._hf_tokenizer
             model = self._hf_model
@@ -229,29 +227,6 @@ class LLMClient:
             if do_sample:
                 gen_kwargs["temperature"] = temperature
                 gen_kwargs["top_p"] = top_p
-
-            class _StopAfterToolName(StoppingCriteria):
-                """Stop once the DAG node's tool name has been emitted.
-
-                The planner parser can recover the standard prompt tool_input
-                for one-node bit plans, so there is no value in letting the
-                LoRA copy the full puzzle prompt into malformed JSON.
-                """
-
-                def __init__(self, prompt_len: int):
-                    self.prompt_len = prompt_len
-
-                def __call__(self, input_ids, scores, **kwargs) -> bool:
-                    generated_ids = input_ids[0][self.prompt_len:]
-                    if generated_ids.numel() < 8:
-                        return False
-                    text = tokenizer.decode(generated_ids, skip_special_tokens=True)
-                    return bool(re.search(r'"tool"\s*:\s*"[^"]+"', text))
-
-            if self.provider == "hf_lora":
-                gen_kwargs["stopping_criteria"] = StoppingCriteriaList([
-                    _StopAfterToolName(input_ids.shape[-1])
-                ])
 
             with torch.inference_mode():
                 output = model.generate(**gen_kwargs)

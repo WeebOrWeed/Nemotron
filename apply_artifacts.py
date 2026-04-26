@@ -46,6 +46,29 @@ GENERATED_BLOCK_HEADER = "# === Auto-generated tools (apply_artifacts.py) ==="
 GENERATED_BLOCK_FOOTER = "# === End auto-generated tools ==="
 PLANNER_BLOCK_HEADER = "=== Auto-generated tools (from RL failure analysis) ==="
 FEWSHOT_BLOCK_HEADER = "FEW-SHOT EXAMPLES OF CORRECT PLANS:"
+FORBIDDEN_MONOLITHIC_TOOLS = {
+    "solve_bit_manipulation",
+    "solve_composite_bit_rule",
+    "solve_numeral_conversion",
+    "solve_cipher_decryption",
+    "solve_equation_transform",
+    "generate_bit_rule_candidates",
+    "select_bit_candidate",
+}
+BIT_TOOL_PREFIX_ALLOWLIST = (
+    "extract_",
+    "try_",
+    "score_",
+    "rank_",
+    "select_",
+    "apply_",
+    "normalize_",
+    "validate_",
+)
+
+
+def _uses_forbidden_monolith(text: str) -> bool:
+    return any(re.search(rf"\b{re.escape(name)}\b", text) for name in FORBIDDEN_MONOLITHIC_TOOLS)
 
 
 # ─── Tool merging ───────────────────────────────────────────────────────
@@ -110,6 +133,12 @@ def merge_tools(allowed_types: set[str] | None, dry_run: bool) -> dict:
         ptype = type_by_name.get(name, "unknown")
         if allowed_types is not None and ptype not in allowed_types:
             skipped.append((name, f"type {ptype} not in {allowed_types}"))
+            continue
+        if name in FORBIDDEN_MONOLITHIC_TOOLS or name.startswith("solve_"):
+            skipped.append((name, "type-specific monolithic solver names are forbidden"))
+            continue
+        if ptype == "bit_manipulation" and not name.startswith(BIT_TOOL_PREFIX_ALLOWLIST):
+            skipped.append((name, "bit tools must be composable strategy-step names"))
             continue
         if name in existing_names:
             skipped.append((name, "already exists in src/tools.py"))
@@ -206,6 +235,8 @@ def _load_winners_for_fewshot(allowed_types: set[str] | None) -> dict[str, dict]
                 continue
             if allowed_types is not None and pt not in allowed_types:
                 continue
+            if _uses_forbidden_monolith(r.get("planner_output", "")):
+                continue
             if pt not in best_by_type or r["reward"] > best_by_type[pt]["reward"]:
                 best_by_type[pt] = r
     return best_by_type
@@ -230,7 +261,8 @@ def update_planner_prompt(allowed_types: set[str] | None, added_tools: list[str]
 
     catalogue_lines = [f"\n\n{PLANNER_BLOCK_HEADER}\n"]
     catalogue_lines.append("These tools were proposed by failure analysis and added to src/tools.py.\n")
-    catalogue_lines.append("Use them when an existing per-type tool is insufficient.\n\n")
+    catalogue_lines.append("Use them when an existing composable tool is insufficient.\n")
+    catalogue_lines.append("Do not add or use type-specific end-to-end solve_* tools.\n\n")
     added_set = set(added_tools)
     n_listed = 0
     for t in analysis["generated_tools"]:
@@ -251,7 +283,7 @@ def update_planner_prompt(allowed_types: set[str] | None, added_tools: list[str]
             fewshot_lines.append(f"\n=== {pt} (reward={r['reward']}) ===\n")
             fewshot_lines.append(f"Input: PUZZLE_TYPE: {pt}\n")
             fewshot_lines.append("Output:\n")
-            fewshot_lines.append(r["planner_output"][:1500].rstrip() + "\n")
+            fewshot_lines.append(r["planner_output"].rstrip() + "\n")
     fewshot_block = "".join(fewshot_lines)
 
     rules_idx = prompt_body.find("\nRULES:")
