@@ -4,3 +4,15 @@ ollama>=0.6.0
 openai>=1.0.0
 pandas>=2.2.0
 python-dotenv>=1.0.0
+
+# Local QLoRA training (train_lora.py) - optional, install with:
+#   pip install -r requirements.txt
+# On Windows, install bitsandbytes via:
+#   pip install bitsandbytes>=0.43.0  (CUDA 12.x wheels are official as of 0.43)
+torch>=2.1.0
+transformers>=4.45.0
+trl>=0.12.0
+peft>=0.13.0
+bitsandbytes>=0.43.0
+accelerate>=1.0.0
+datasets>=3.0.0

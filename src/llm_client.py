@@ -5,9 +5,12 @@ Auto-selects the provider based on ``LLM_PROVIDER`` env var.  When set to
 """
 from __future__ import annotations
 
+import json
 import os
+import re
+import threading
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 import ollama
 from openai import OpenAI
@@ -30,15 +33,22 @@ class LLMClient:
     deepseek_model: str = "deepseek-chat"
     openrouter_api_key: str = ""
     openrouter_model: str = "nvidia/llama-3.1-nemotron-70b-instruct"
+    hf_base_model: str = "Qwen/Qwen2.5-3B-Instruct"
+    hf_lora_path: str = "models/planner-lora"
+    hf_max_new_tokens: int = 384
+    hf_load_4bit: bool = True
 
     _resolved_provider: Optional[str] = field(default=None, init=False, repr=False)
+    _hf_tokenizer: Any = field(default=None, init=False, repr=False)
+    _hf_model: Any = field(default=None, init=False, repr=False)
+    _hf_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def _resolve_provider(self) -> str:
         """Decide which backend to use (cached after first call)."""
         if self._resolved_provider is not None:
             return self._resolved_provider
 
-        if self.provider in ("ollama", "openrouter", "deepseek"):
+        if self.provider in ("ollama", "openrouter", "deepseek", "hf_lora"):
             self._resolved_provider = self.provider
             return self._resolved_provider
 
@@ -75,6 +85,9 @@ class LLMClient:
         if provider == "openrouter":
             return self._chat_openrouter(messages, think=think, temperature=temperature,
                                          top_p=top_p, max_tokens=max_tokens)
+        if provider == "hf_lora":
+            return self._chat_hf_lora(messages, think=think, temperature=temperature,
+                                      top_p=top_p, max_tokens=max_tokens)
         return self._chat_deepseek(messages, think=think, temperature=temperature,
                                    top_p=top_p, max_tokens=max_tokens)
 
@@ -130,3 +143,118 @@ class LLMClient:
         content = choice.message.content or ""
         reasoning = getattr(choice.message, "reasoning_content", None)
         return LLMResponse(content=content, thinking=reasoning)
+
+    # ── Local HuggingFace + PEFT LoRA ─────────────────────────────────────
+
+    def _load_hf_lora(self) -> None:
+        """Lazy-load the local planner LoRA adapter."""
+        if self._hf_model is not None and self._hf_tokenizer is not None:
+            return
+
+        import torch
+        from peft import PeftModel
+        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+
+        adapter_config_path = os.path.join(self.hf_lora_path, "adapter_config.json")
+        base_model = self.hf_base_model
+        if os.path.exists(adapter_config_path):
+            with open(adapter_config_path, "r", encoding="utf-8") as f:
+                adapter_config = json.load(f)
+            base_model = adapter_config.get("base_model_name_or_path") or base_model
+
+        tokenizer = AutoTokenizer.from_pretrained(self.hf_lora_path, trust_remote_code=True)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        model_kwargs: dict[str, Any] = {"device_map": "auto", "trust_remote_code": True}
+        if self.hf_load_4bit and torch.cuda.is_available():
+            model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_use_double_quant=True,
+            )
+        elif torch.cuda.is_available():
+            model_kwargs["torch_dtype"] = torch.bfloat16
+
+        base = AutoModelForCausalLM.from_pretrained(base_model, **model_kwargs)
+        model = PeftModel.from_pretrained(base, self.hf_lora_path)
+        model.eval()
+
+        self._hf_tokenizer = tokenizer
+        self._hf_model = model
+
+    def _chat_hf_lora(self, messages, *, think, temperature, top_p, max_tokens) -> LLMResponse:
+        if think:
+            # Local HF generation has no separate "thinking" channel.
+            think = False
+        with self._hf_lock:
+            self._load_hf_lora()
+
+            import torch
+            from transformers import StoppingCriteria, StoppingCriteriaList
+
+            tokenizer = self._hf_tokenizer
+            model = self._hf_model
+            encoded = tokenizer.apply_chat_template(
+                messages,
+                return_tensors="pt",
+                return_dict=True,
+                add_generation_prompt=True,
+            )
+            if hasattr(encoded, "data"):
+                input_ids = encoded["input_ids"]
+                attention_mask = encoded.get("attention_mask")
+            elif isinstance(encoded, dict):
+                input_ids = encoded["input_ids"]
+                attention_mask = encoded.get("attention_mask")
+            else:
+                input_ids = encoded
+                attention_mask = None
+
+            device = model.device
+            input_ids = input_ids.to(device)
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(device)
+
+            do_sample = temperature is not None and temperature > 0
+            gen_kwargs: dict[str, Any] = {
+                "input_ids": input_ids,
+                "max_new_tokens": min(max_tokens, self.hf_max_new_tokens),
+                "do_sample": do_sample,
+                "pad_token_id": tokenizer.pad_token_id or tokenizer.eos_token_id,
+            }
+            if attention_mask is not None:
+                gen_kwargs["attention_mask"] = attention_mask
+            if do_sample:
+                gen_kwargs["temperature"] = temperature
+                gen_kwargs["top_p"] = top_p
+
+            class _StopAfterToolName(StoppingCriteria):
+                """Stop once the DAG node's tool name has been emitted.
+
+                The planner parser can recover the standard prompt tool_input
+                for one-node bit plans, so there is no value in letting the
+                LoRA copy the full puzzle prompt into malformed JSON.
+                """
+
+                def __init__(self, prompt_len: int):
+                    self.prompt_len = prompt_len
+
+                def __call__(self, input_ids, scores, **kwargs) -> bool:
+                    generated_ids = input_ids[0][self.prompt_len:]
+                    if generated_ids.numel() < 8:
+                        return False
+                    text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+                    return bool(re.search(r'"tool"\s*:\s*"[^"]+"', text))
+
+            if self.provider == "hf_lora":
+                gen_kwargs["stopping_criteria"] = StoppingCriteriaList([
+                    _StopAfterToolName(input_ids.shape[-1])
+                ])
+
+            with torch.inference_mode():
+                output = model.generate(**gen_kwargs)
+            generated = output[0][input_ids.shape[-1]:]
+            content = tokenizer.decode(generated, skip_special_tokens=True).strip()
+            return LLMResponse(content=content, thinking=None)

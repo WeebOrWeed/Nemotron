@@ -10,6 +10,7 @@ from src.config import (
     MODEL_NAME, OLLAMA_BASE_URL, TRAIN_PATH, TEST_PATH, RESULTS_DIR,
     LLM_PROVIDER, DEEPSEEK_API_KEY, DEEPSEEK_MODEL,
     OPEN_ROUTER_API_KEY, OPEN_ROUTER_MODEL,
+    PLANNER_PROVIDER, HF_PLANNER_LORA_PATH,
 )
 from src.graph import build_graph
 from src.llm_client import LLMClient
@@ -126,11 +127,14 @@ def run(
         "ollama": MODEL_NAME,
         "openrouter": OPEN_ROUTER_MODEL,
         "deepseek": DEEPSEEK_MODEL,
+        "hf_lora": HF_PLANNER_LORA_PATH,
     }.get(provider, MODEL_NAME)
 
     total = len(df)
     print(f"Loaded {total} rows from {dataset_path}")
     print(f"Provider: {provider}  |  Model: {model_display}")
+    if PLANNER_PROVIDER:
+        print(f"Planner provider: {PLANNER_PROVIDER}")
     print(f"Batch size: {batch_size}")
 
     graph = build_graph(llm)

@@ -249,6 +249,11 @@ Nemotron/
 ├── main.py                 # CLI entry point with --verbose DAG trace and --types filter
 ├── trace_row.py            # Run one train id, print each DAG step I/O
 ├── train_planner.py        # RL scoring harness: N candidate DAGs per puzzle → JSONL
+├── train_lora.py           # Local QLoRA SFT on winning DAGs (uses kaggle_output JSONL)
+├── apply_artifacts.py      # Merge kaggle_output/ tools + few-shots into src/tools.py + src/planner.py
+├── iterate_local.py        # End-to-end local RL loop: collect → analyze → gen tools → apply → retrain
+├── kaggle_output/          # Pulled artifacts: tools_generated.py, failure_analysis.json, planner_scores.jsonl
+├── models/                 # Local LoRA adapter output dir (planner-lora/)
 ├── requirements.txt        # Python dependencies
 ├── design.md               # This file
 ├── .env.example            # Template for config overrides
@@ -430,11 +435,13 @@ on Kaggle using `notebooks/grpo_planner.ipynb`. The notebook:
    classifies the root cause (bad plan, missing tool, tool bug, bad input)
    and proposes a fix.  For `NEW_TOOL` proposals, it generates concrete
    Python function code ready to paste into `tools.py`.
-3. **Trains** a QLoRA adapter on Qwen-7B using SFTTrainer on the winning
-   plans.
-4. **Outputs** the LoRA adapter, an updated `PLANNER_SYSTEM` with embedded
-   few-shot examples, and a `failure_analysis.json` with all proposals and
-   generated tool code.
+3. **Saves artifacts early** -- `tools_generated.py`, `failure_analysis.json`,
+   `planner_scores.jsonl`, and `planner_system_updated.txt` are all written
+   before training begins, so they survive any training-phase crash.
+4. **Trains** a QLoRA adapter on Qwen-7B using SFTTrainer on the winning
+   plans. Training is automatically skipped (with a warning) if the GPU
+   capability is below sm_70 (e.g. P100), since 4-bit QLoRA requires T4+.
+5. **Outputs** the LoRA adapter plus all early artifacts for local sync.
 
 Supporting files:
 
@@ -450,6 +457,163 @@ Sync artifacts back:
 kaggle kernels output tianlinzhao1/grpo-dag-planner-training -p kaggle_output/
 # Copy planner_system_updated.txt content into PLANNER_SYSTEM in src/planner.py
 ```
+
+### Selecting a planner backend
+
+The DAG planner (in `src/classify.py::_make_planner_llm`) picks a backend based
+on the `PLANNER_PROVIDER` env var, falling back to whichever cloud key is set:
+
+| `PLANNER_PROVIDER` | Backend | When to use |
+|--------------------|---------|-------------|
+| `ollama`           | local Ollama (`MODEL_NAME`) | offline / no API credits |
+| `openrouter`       | OpenRouter API              | best DAG quality, paid |
+| `deepseek`         | DeepSeek API                | cheap cloud alternative |
+| `hf_lora`          | local HuggingFace + PEFT adapter | exercise `models/planner-lora` directly |
+| _(unset)_          | OpenRouter if key set, else DeepSeek | default |
+
+When `PLANNER_PROVIDER=hf_lora`, the planner loads the local PEFT adapter from
+`HF_PLANNER_LORA_PATH` (default `models/planner-lora`) on top of
+`HF_PLANNER_BASE_MODEL` (default `Qwen/Qwen2.5-3B-Instruct`). The adapter is
+lazy-loaded on the first planner call, uses 4-bit loading by default
+(`HF_PLANNER_LOAD_4BIT=1`), and caps generation with
+`HF_PLANNER_MAX_NEW_TOKENS` (default `192`) because planner DAGs are short.
+This path is useful for validating the trained adapter, but current
+bit-manipulation accuracy is still bound by the deterministic bit solver rather
+than the planner shape.
+
+### Local QLoRA Training
+
+Because Kaggle imposes a weekly GPU-hour quota, the full RL artifact-application
++ LoRA training loop can be run locally after pulling the scored data from
+Kaggle. The flow is:
+
+1. **Pull artifacts** from the last Kaggle run:
+   ```bash
+   kaggle kernels output tianlinzhao1/grpo-dag-planner-training -p kaggle_output/
+   ```
+2. **Apply artifacts** to the codebase via `apply_artifacts.py`. This:
+   - Appends each new auto-generated tool from `kaggle_output/tools_generated.py`
+     into `src/tools.py` (deduped by name) and registers them in `TOOL_REGISTRY`.
+   - Inserts the new tool catalogue entries and one few-shot example per puzzle
+     type into `PLANNER_SYSTEM` in `src/planner.py`, immediately before the
+     trailing `RULES:` section so re-runs are idempotent.
+   - Writes `.bak` files for both touched sources so changes are reversible.
+
+   ```bash
+   python apply_artifacts.py                            # all puzzle types
+   python apply_artifacts.py --types bit_manipulation   # bit_manipulation only
+   python apply_artifacts.py --dry-run                  # preview, no writes
+   ```
+3. **Train LoRA** locally via `train_lora.py`. The script:
+   - Reads `kaggle_output/planner_scores.jsonl` (or any JSONL of scored DAGs).
+   - Filters winners by `--min-reward` (default 0.5) and `--types`, then dedupes
+     one-per-puzzle.
+   - Loads a base instruct model (default `Qwen/Qwen2.5-3B-Instruct`, swap to
+     `Qwen/Qwen2.5-7B-Instruct` for 24 GB+ GPUs) with 4-bit QLoRA.
+   - Trains a LoRA adapter (rank 16, alpha 32, all attention + MLP projections)
+     and saves it under `models/planner-lora/`.
+
+   ```bash
+   pip install -r requirements.txt   # installs torch/trl/peft/bitsandbytes
+   python train_lora.py                                                # all types
+   python train_lora.py --types bit_manipulation --epochs 3            # one type
+   python train_lora.py --model Qwen/Qwen2.5-7B-Instruct --epochs 5
+   ```
+
+Training requires a CUDA GPU with compute capability sm_70+ (RTX 20-series or
+newer); the script checks this and aborts with a clear message otherwise.
+On Windows, set `PYTHONUTF8=1` so trl can read its UTF-8 chat templates.
+
+To run the trained adapter as the DAG planner:
+
+```bash
+set PLANNER_PROVIDER=hf_lora
+set HF_PLANNER_LORA_PATH=models/planner-lora
+python main.py --dataset data/bit_manipulation_test_50.csv --types bit_manipulation --batch-size 1
+```
+
+`hf_lora` planner inference is much slower than Ollama on the local RTX 3080
+for these short plans, so the default local evaluation path remains
+`PLANNER_PROVIDER=ollama` until the adapter is merged or served through a faster
+runtime.
+
+### One-shot local iteration (`iterate_local.py`)
+
+For a fully local self-improvement cycle (no Kaggle round-trip), use
+`iterate_local.py`. It chains all five phases into one command:
+
+1. **Phase 1 – Collect:** runs `N` candidate DAGs per puzzle through the local
+   planner + executor and scores them, writing `kaggle_output/planner_scores.jsonl`.
+2. **Phase 2 – Analyze:** for each VALID-but-wrong puzzle, asks an LLM to
+   classify the failure (`BAD_PLAN | TOOL_LIMITATION | TOOL_BUG | BAD_INPUT |
+   MISSING_TOOL`) and propose a fix (`UPDATE_PROMPT | NEW_TOOL | FIX_TOOL`).
+3. **Phase 3 – Generate tools:** asks the LLM to produce concrete Python for
+   each `NEW_TOOL` proposal, validates syntax/signature/uniqueness, installs
+   into the runtime, and saves `kaggle_output/tools_generated.py` plus
+   `kaggle_output/failure_analysis.json`.
+4. **Phase 4 – Apply:** invokes `apply_artifacts.py` to merge the new tools and
+   few-shot examples into `src/tools.py` and `src/planner.py`.
+5. **Phase 5 – Retrain:** invokes `train_lora.py` on the freshly scored data.
+
+Each phase is independently skippable via `--skip-collect / --skip-analyze /
+--skip-apply / --skip-train`. The planner and analyzer LLMs can be picked
+independently with `--planner-llm` and `--analyzer-llm`
+(`ollama | openrouter | deepseek`); the executor always uses local Ollama.
+
+```bash
+# Full cycle on bit_manipulation, 30 puzzles × 2 candidates, retrain 3 epochs
+python iterate_local.py --types bit_manipulation --limit 30 --n 2 --epochs 3
+
+# Iterate over a fresh slice so the planner doesn't keep training on
+# the same puzzles (held-out test was rows 30..79 of bit_manipulation)
+python iterate_local.py --types bit_manipulation --offset 80 --limit 30
+
+# Reuse existing scored data, only regenerate tools and retrain
+python iterate_local.py --skip-collect --types bit_manipulation
+```
+
+**Phase 2 robustness:** the analyzer prompt is templated with the live
+contents of `TOOL_REGISTRY` so the LLM cannot hallucinate that an existing
+tool is "missing". When the analyzer suggests `NEW_TOOL` with a name that
+is already registered, the orchestrator auto-downgrades the proposal to
+`FIX_TOOL` to avoid wasting Phase 3 on duplicate generations.
+
+**Phase 3 robustness:** the tool-generation prompt is also templated with
+the existing tool names as a forbidden list, so a new function cannot
+shadow an existing one.
+
+**`apply_artifacts.py` is append-only.** Earlier versions stripped and
+re-wrote the auto-generated block on every run; that turned out to be
+destructive when a new run produced fewer tools than the previous one
+(the `TOOL_REGISTRY` kept stale references after the function bodies were
+removed). The current implementation only appends new tool definitions
+that aren't already in the file.
+
+### Bit-Manipulation Solver Notes
+
+`solve_bit_manipulation` is the dominant accuracy bottleneck for the
+`bit_manipulation` slice because the planner reliably emits the same one-node
+DAG (`solve_bit_manipulation` with the full prompt). The solver now uses a
+small deterministic ensemble:
+
+1. Whole-byte transforms (`_try_byte_ops`).
+2. GF(2)-affine fitting.
+3. The broader per-bit brute-force rule search.
+4. Shifted local truth tables with arities 2, 3, and 4, each using four
+   policies for unseen target keys (`zero`, `one`, `majority`, `input`).
+5. A selector that trusts the GF(2) affine result when it agrees with at least
+   two shifted `input`-policy candidates.
+6. Per-bit majority voting across the candidate outputs.
+
+The final output is canonical binary without leading zeros (`"0"` for zero),
+matching the answer formatting observed in the held-out fixture. On the local
+50-row held-out `bit_manipulation` fixture this raised exact end-to-end
+accuracy from 26/50 (52%) to 37/50 (74%) with the Ollama planner. A lightweight
+training-derived weighted selector over another labeled slice did not improve
+over the unweighted ensemble (35/50), and broader independent per-bit /
+parametric boolean-function families did not produce enough new correct
+candidates to reach 85%. The remaining failures need genuinely new rule
+families or a stronger learned selector.
 
 ## Discussion
 

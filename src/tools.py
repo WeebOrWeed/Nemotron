@@ -9,10 +9,12 @@ The special tool "ask_llm" is handled by the solver (routes to the LLM).
 from __future__ import annotations
 
 import ast
+import itertools
 import json
 import math
 import operator
 import re
+from collections import defaultdict
 
 
 # ===================================================================
@@ -871,6 +873,172 @@ def _majority(a: int, b: int, c: int) -> int:
     return (a & b) | (a & c) | (b & c)
 
 
+def _try_shifted_3bit_truth_table(
+    inputs: list[int], outputs: list[int], target: int
+) -> int | None:
+    """Infer a global shifted 3-input truth table for every output bit.
+
+    Many generated puzzles use the same local 3-bit relation at each output
+    position, but shifted relative to the source byte. The target's 3-bit
+    key may be unseen for a few output positions; those positions fall back
+    to zero in this candidate and the broader brute-force solver remains as
+    a later fallback when this pattern is not useful.
+    """
+    BITS = 8
+    n_ex = len(inputs)
+    input_cols = [tuple((i >> b) & 1 for i in inputs) for b in range(BITS)]
+    target_bits = [(target >> b) & 1 for b in range(BITS)]
+    out_cols = [tuple((o >> b) & 1 for o in outputs) for b in range(BITS)]
+
+    best_result = None
+    best_score = (-1, -1)  # (consistent output bits, known target keys)
+
+    for oa in range(BITS):
+        for ob in range(BITS):
+            for oc in range(BITS):
+                pred_bits: list[int] = []
+                consistent = 0
+                known = 0
+
+                for out_pos in range(BITS):
+                    cols = ((out_pos + oa) % BITS, (out_pos + ob) % BITS, (out_pos + oc) % BITS)
+                    observed: dict[tuple[int, int, int], int] = {}
+                    ok = True
+                    for k in range(n_ex):
+                        key = tuple(input_cols[p][k] for p in cols)
+                        val = out_cols[out_pos][k]
+                        if key in observed and observed[key] != val:
+                            ok = False
+                            break
+                        observed[key] = val
+
+                    if not ok:
+                        pred_bits.append(0)
+                        continue
+
+                    consistent += 1
+                    target_key = tuple(target_bits[p] for p in cols)
+                    if target_key in observed:
+                        known += 1
+                        pred_bits.append(observed[target_key])
+                    else:
+                        pred_bits.append(0)
+
+                score = (consistent, known)
+                if score > best_score:
+                    best_score = score
+                    best_result = sum(b << i for i, b in enumerate(pred_bits))
+
+    return best_result
+
+
+def _shifted_truth_table_candidate(
+    inputs: list[int],
+    outputs: list[int],
+    target: int,
+    arity: int,
+    unknown_policy: str,
+) -> int:
+    """Return the best shifted local truth-table candidate for an arity/policy."""
+    BITS = 8
+    n_ex = len(inputs)
+    input_cols = [tuple((i >> b) & 1 for i in inputs) for b in range(BITS)]
+    target_bits = [(target >> b) & 1 for b in range(BITS)]
+    out_cols = [tuple((o >> b) & 1 for o in outputs) for b in range(BITS)]
+
+    best_result = 0
+    best_score = (-1, -1, -999)  # consistent bits, known target keys, confidence
+
+    for offsets in itertools.product(range(BITS), repeat=arity):
+        pred_bits: list[int] = []
+        consistent = 0
+        known = 0
+        confidence = 0
+
+        for out_pos in range(BITS):
+            positions = tuple((out_pos + offset) % BITS for offset in offsets)
+            observed: dict[tuple[int, ...], int] = {}
+            ok = True
+            for k in range(n_ex):
+                key = tuple(input_cols[p][k] for p in positions)
+                val = out_cols[out_pos][k]
+                if key in observed and observed[key] != val:
+                    ok = False
+                    break
+                observed[key] = val
+
+            if not ok:
+                pred_bits.append(0)
+                continue
+
+            consistent += 1
+            target_key = tuple(target_bits[p] for p in positions)
+            if target_key in observed:
+                known += 1
+                confidence += 2
+                pred_bits.append(observed[target_key])
+            else:
+                if unknown_policy == "one":
+                    val = 1
+                elif unknown_policy == "majority":
+                    val = 1 if sum(out_cols[out_pos]) * 2 >= n_ex else 0
+                elif unknown_policy == "input":
+                    val = target_bits[out_pos]
+                else:
+                    val = 0
+                confidence -= 1
+                pred_bits.append(val)
+
+        score = (consistent, known, confidence)
+        if score > best_score:
+            best_score = score
+            best_result = sum(b << i for i, b in enumerate(pred_bits))
+
+    return best_result
+
+
+def _try_bit_rule_ensemble(
+    inputs: list[int], outputs: list[int], target: int
+) -> int | None:
+    """Combine several plausible bit-rule candidates with per-bit voting.
+
+    The local bit puzzles are underdetermined: many rules can fit the examples
+    but disagree on the held-out target. A small ensemble of independent rule
+    families is more stable than always trusting the first consistent rule.
+    """
+    candidates: list[int] = []
+
+    for fn in (_try_byte_ops, _try_gf2_linear, _brute_force_bit_rule):
+        result = fn(inputs, outputs, target)
+        if result is not None:
+            candidates.append(result & 0xFF)
+
+    for arity in (2, 3, 4):
+        for policy in ("zero", "one", "majority", "input"):
+            candidates.append(
+                _shifted_truth_table_candidate(inputs, outputs, target, arity, policy)
+            )
+
+    if not candidates:
+        return None
+
+    gf2_result = _try_gf2_linear(inputs, outputs, target)
+    if gf2_result is not None:
+        input_policy_votes = [
+            _shifted_truth_table_candidate(inputs, outputs, target, arity, "input")
+            for arity in (2, 3, 4)
+        ]
+        if sum((vote & 0xFF) == (gf2_result & 0xFF) for vote in input_policy_votes) >= 2:
+            return gf2_result & 0xFF
+
+    result = 0
+    for bit in range(8):
+        ones = sum((candidate >> bit) & 1 for candidate in candidates)
+        if ones * 2 >= len(candidates):
+            result |= 1 << bit
+    return result
+
+
 def _brute_force_bit_rule(
     inputs: list[int], outputs: list[int], target: int
 ) -> int | None:
@@ -1058,13 +1226,17 @@ def solve_bit_manipulation(tool_input: str) -> str:
     if not target_match:
         target_match = re.search(r'for:?\s*([01]{8})', prompt, re.IGNORECASE)
     target = int(target_match.group(1), 2)
-    result = _try_byte_ops(inputs, outputs, target)
+    result = _try_bit_rule_ensemble(inputs, outputs, target)
+    if result is None:
+        result = _try_byte_ops(inputs, outputs, target)
+    if result is None:
+        result = _try_shifted_3bit_truth_table(inputs, outputs, target)
     if result is None:
         result = _try_gf2_linear(inputs, outputs, target)
     if result is None:
         result = _brute_force_bit_rule(inputs, outputs, target)
     if result is not None:
-        return format(result, '08b')
+        return format(result, '08b').lstrip("0") or "0"
     raise ValueError("Could not find consistent bit manipulation rule")
 
 
@@ -1074,6 +1246,1464 @@ from src.tools_equation import solve_equation_transform  # noqa: E402
 # ===================================================================
 # Registry
 # ===================================================================
+
+
+
+# === Auto-generated tools (apply_artifacts.py) ===
+# [bit_manipulation] search_bit_transformation
+def search_bit_transformation(raw: str) -> str:
+    """Search for bitwise transformation rule from examples and apply to target."""
+    params = json.loads(raw)
+    examples = params['examples']
+    target = params['target']
+    
+    # Define basic operations on 8-bit integers
+    def apply_op(op, val, arg=None):
+        if op == 'NOT':
+            return (~val) & 0xFF
+        elif op == 'AND':
+            return (val & arg) & 0xFF
+        elif op == 'OR':
+            return (val | arg) & 0xFF
+        elif op == 'XOR':
+            return (val ^ arg) & 0xFF
+        elif op == 'LEFT_SHIFT':
+            return (val << arg) & 0xFF
+        elif op == 'RIGHT_SHIFT':
+            return (val >> arg) & 0xFF
+        elif op == 'ROTATE_LEFT':
+            return ((val << arg) | (val >> (8 - arg))) & 0xFF
+        elif op == 'ROTATE_RIGHT':
+            return ((val >> arg) | (val << (8 - arg))) & 0xFF
+        return val
+    
+    # Possible operations and their arity
+    operations = [
+        ('NOT', 1),
+        ('AND', 2),
+        ('OR', 2),
+        ('XOR', 2),
+        ('LEFT_SHIFT', 2),
+        ('RIGHT_SHIFT', 2),
+        ('ROTATE_LEFT', 2),
+        ('ROTATE_RIGHT', 2)
+    ]
+    
+    # Possible arguments for binary operations (0-255 for AND/OR/XOR, 1-7 for shifts/rotations)
+    possible_args = {
+        'AND': list(range(256)),
+        'OR': list(range(256)),
+        'XOR': list(range(256)),
+        'LEFT_SHIFT': list(range(1, 8)),
+        'RIGHT_SHIFT': list(range(1, 8)),
+        'ROTATE_LEFT': list(range(1, 8)),
+        'ROTATE_RIGHT': list(range(1, 8))
+    }
+    
+    # Convert examples to integers
+    int_examples = []
+    for ex in examples:
+        inp = int(ex['input'], 2)
+        out = int(ex['output'], 2)
+        int_examples.append((inp, out))
+    
+    # Search for single-operation rules first
+    for op_name, arity in operations:
+        if arity == 1:
+            # Test unary operation
+            valid = True
+            for inp, out in int_examples:
+                if apply_op(op_name, inp) != out:
+                    valid = False
+                    break
+            if valid:
+                result = apply_op(op_name, int(target, 2))
+                return json.dumps({
+                    'rule_description': f'{op_name}(input)',
+                    'result': format(result, '08b')
+                })
+        else:
+            # Test binary operation with all possible arguments
+            for arg in possible_args[op_name]:
+                valid = True
+                for inp, out in int_examples:
+                    if apply_op(op_name, inp, arg) != out:
+                        valid = False
+                        break
+                if valid:
+                    result = apply_op(op_name, int(target, 2), arg)
+                    return json.dumps({
+                        'rule_description': f'input {op_name} {arg} ({format(arg, "08b") if op_name in ["AND","OR","XOR"] else arg})',
+                        'result': format(result, '08b')
+                    })
+    
+    # Search for two-operation sequences
+    for op1_name, arity1 in operations:
+        for op2_name, arity2 in operations:
+            # Generate all argument combinations
+            args1_range = [None] if arity1 == 1 else possible_args[op1_name]
+            args2_range = [None] if arity2 == 1 else possible_args[op2_name]
+            
+            for arg1 in args1_range:
+                for arg2 in args2_range:
+                    valid = True
+                    for inp, out in int_examples:
+                        val = apply_op(op1_name, inp, arg1)
+                        val = apply_op(op2_name, val, arg2)
+                        if val != out:
+                            valid = False
+                            break
+                    if valid:
+                        result = apply_op(op1_name, int(target, 2), arg1)
+                        result = apply_op(op2_name, result, arg2)
+                        arg1_str = f' {arg1} ({format(arg1, "08b")})' if arg1 is not None else ''
+                        arg2_str = f' {arg2} ({format(arg2, "08b")})' if arg2 is not None else ''
+                        return json.dumps({
+                            'rule_description': f'{op2_name}({op1_name}(input{arg1_str}){arg2_str})',
+                            'result': format(result, '08b')
+                        })
+    
+    # If no rule found, return failure
+    return json.dumps({
+        'rule_description': 'No consistent rule found with up to 2 operations',
+        'result': None
+    })
+
+# [bit_manipulation] deduce_bit_transformation_rule
+def deduce_bit_transformation_rule(raw: str) -> str:
+    """Infers a bit transformation rule from examples and applies it to target."""
+    params = json.loads(raw)
+    examples = params['examples']
+    target = params['target']
+    
+    # If no examples, return identity rule
+    if not examples:
+        result = {
+            'rule_description': 'No examples provided, identity mapping assumed.',
+            'predicted_output': target
+        }
+        return json.dumps(result)
+    
+    # Analyze bit positions
+    max_len = max(len(ex['input']) for ex in examples)
+    # Pad all examples to max_len for consistent analysis
+    padded_examples = []
+    for ex in examples:
+        inp = ex['input'].ljust(max_len, '0')
+        out = ex['output'].ljust(max_len, '0')
+        padded_examples.append((inp, out))
+    
+    # Try to detect simple global operations first
+    # Check if it's a simple bitwise NOT
+    not_match = all(
+        all(c1 != c2 for c1, c2 in zip(inp, out)) 
+        for inp, out in padded_examples
+    )
+    if not_match:
+        predicted = ''.join('1' if c == '0' else '0' for c in target.ljust(max_len, '0'))
+        predicted = predicted[:len(target)]  # Trim back to original target length
+        result = {
+            'rule_description': 'Bitwise NOT (invert all bits)',
+            'predicted_output': predicted
+        }
+        return json.dumps(result)
+    
+    # Check if it's a shift operation
+    # Try left shift
+    left_shift_match = all(
+        out[1:] + '0' == inp or out[1:] == inp[:-1]
+        for inp, out in padded_examples
+    )
+    if left_shift_match:
+        predicted = target[1:] + '0' if len(target) > 1 else '0'
+        result = {
+            'rule_description': 'Left shift by 1 position (fill LSB with 0)',
+            'predicted_output': predicted
+        }
+        return json.dumps(result)
+    
+    # Try right shift
+    right_shift_match = all(
+        '0' + out[:-1] == inp or out[:-1] == inp[1:]
+        for inp, out in padded_examples
+    )
+    if right_shift_match:
+        predicted = '0' + target[:-1] if len(target) > 1 else '0'
+        result = {
+            'rule_description': 'Right shift by 1 position (fill MSB with 0)',
+            'predicted_output': predicted
+        }
+        return json.dumps(result)
+    
+    # Analyze position-wise mapping
+    position_map = defaultdict(set)
+    for inp, out in padded_examples:
+        for i, (in_bit, out_bit) in enumerate(zip(inp, out)):
+            position_map[i].add((in_bit, out_bit))
+    
+    # Check if each position has a deterministic mapping
+    rule_applicable = True
+    position_rules = {}
+    for i, mappings in position_map.items():
+        if len(mappings) > 1:
+            # Multiple mappings for same input bit at this position
+            rule_applicable = False
+            break
+        in_bit, out_bit = next(iter(mappings))
+        position_rules[i] = (in_bit, out_bit)
+    
+    if rule_applicable:
+        # Apply position-wise mapping
+        predicted_chars = []
+        target_padded = target.ljust(max_len, '0')
+        for i, c in enumerate(target_padded):
+            if i in position_rules:
+                in_bit, out_bit = position_rules[i]
+                if c == in_bit:
+                    predicted_chars.append(out_bit)
+                else:
+                    # If input bit doesn't match the rule's expected input, 
+                    # we can't determine output - use fallback
+                    predicted_chars.append(c)
+            else:
+                predicted_chars.append(c)
+        predicted = ''.join(predicted_chars)[:len(target)]
+        
+        # Create rule description
+        rule_desc = 'Position-specific bit mapping: '
+        rules = [f'pos{i}: {in_bit}->{out_bit}' for i, (in_bit, out_bit) in position_rules.items()]
+        rule_desc += '; '.join(rules)
+        
+        result = {
+            'rule_description': rule_desc,
+            'predicted_output': predicted
+        }
+        return json.dumps(result)
+    
+    # If no simple rule found, try XOR with constant
+    # Find a constant that works for all examples
+    constants = []
+    for inp, out in padded_examples:
+        # Convert to integers
+        inp_int = int(inp, 2)
+        out_int = int(out, 2)
+        const = inp_int ^ out_int
+        constants.append(const)
+    
+    if len(set(constants)) == 1:
+        const = constants[0]
+        target_int = int(target.ljust(max_len, '0'), 2)
+        predicted_int = target_int ^ const
+        predicted_bin = bin(predicted_int)[2:].zfill(max_len)
+        predicted = predicted_bin[:len(target)]
+        
+        result = {
+            'rule_description': f'XOR with constant {const} ({bin(const)[2:].zfill(max_len)})',
+            'predicted_output': predicted
+        }
+        return json.dumps(result)
+    
+    # Fallback: return most common output pattern or identity
+    # Count output patterns
+    output_counts = defaultdict(int)
+    for inp, out in padded_examples:
+        output_counts[out] += 1
+    
+    if output_counts:
+        most_common = max(output_counts.items(), key=lambda x: x[1])[0]
+        predicted = most_common[:len(target)]
+        result = {
+            'rule_description': 'No deterministic rule found, using most common output pattern from examples.',
+            'predicted_output': predicted
+        }
+    else:
+        result = {
+            'rule_description': 'No rule could be determined, identity mapping used.',
+            'predicted_output': target
+        }
+    
+    return json.dumps(result)
+
+# [bit_manipulation] brute_force_bit_rule
+def brute_force_bit_rule(raw: str) -> str:
+    """Brute-force searches for a compound bitwise operation rule that fits given input-output examples and applies it to a target."""
+    params = json.loads(raw)
+    examples = params['examples']
+    target_input = params['target_input']
+    
+    # Convert binary strings to integers
+    example_pairs = [(int(ex['input'], 2), int(ex['output'], 2)) for ex in examples]
+    target_val = int(target_input, 2)
+    
+    # Define basic operations
+    def xor_with_const(x, const):
+        return x ^ const
+    
+    def and_with_const(x, const):
+        return x & const
+    
+    def or_with_const(x, const):
+        return x | const
+    
+    def left_shift(x, shift):
+        return x << shift
+    
+    def right_shift(x, shift):
+        return x >> shift
+    
+    # Generate candidate constants and shifts
+    max_bits = max(max(len(ex['input']) for ex in examples), len(target_input))
+    max_const = (1 << max_bits) - 1
+    constants = list(range(max_const + 1))
+    shifts = list(range(0, max_bits + 1))
+    
+    # Operation sequences (single or two operations)
+    operations = [
+        [xor_with_const],
+        [and_with_const],
+        [or_with_const],
+        [left_shift],
+        [right_shift],
+        [xor_with_const, xor_with_const],
+        [and_with_const, xor_with_const],
+        [or_with_const, xor_with_const],
+        [left_shift, xor_with_const],
+        [right_shift, xor_with_const]
+    ]
+    
+    # Brute-force search
+    for ops in operations:
+        if len(ops) == 1:
+            for const in constants:
+                rule_works = True
+                for inp, out in example_pairs:
+                    result = ops[0](inp, const)
+                    if result != out:
+                        rule_works = False
+                        break
+                if rule_works:
+                    target_result = ops[0](target_val, const)
+                    rule_desc = f"{ops[0].__name__} with constant {const:0{max_bits}b}"
+                    return json.dumps({
+                        "rule": rule_desc,
+                        "target_output": format(target_result, f'0{max_bits}b')
+                    })
+        elif len(ops) == 2:
+            for const1 in constants:
+                for const2 in constants:
+                    rule_works = True
+                    for inp, out in example_pairs:
+                        intermediate = ops[0](inp, const1)
+                        result = ops[1](intermediate, const2)
+                        if result != out:
+                            rule_works = False
+                            break
+                    if rule_works:
+                        intermediate = ops[0](target_val, const1)
+                        target_result = ops[1](intermediate, const2)
+                        rule_desc = f"{ops[0].__name__} with constant {const1:0{max_bits}b}, then {ops[1].__name__} with constant {const2:0{max_bits}b}"
+                        return json.dumps({
+                            "rule": rule_desc,
+                            "target_output": format(target_result, f'0{max_bits}b')
+                        })
+    
+    return json.dumps({"rule": "No rule found", "target_output": ""})
+
+# [bit_manipulation] discover_bitwise_rule
+def discover_bitwise_rule(raw: str) -> str:
+    """Searches for compound bitwise operations across examples and applies to target."""
+    params = json.loads(raw)
+    examples = params['examples']
+    target_input = params['target_input']
+    
+    # Convert binary strings to integers
+    example_pairs = [(int(ex['input'], 2), int(ex['output'], 2)) for ex in examples]
+    target_int = int(target_input, 2)
+    
+    # Define basic operations
+    def apply_ops(val, ops_seq):
+        result = val
+        for op in ops_seq:
+            if op == 'NOT':
+                result = ~result & 0xFF  # Assume 8-bit for simplicity
+            elif op == 'AND':
+                result = result & 0xFF
+            elif op == 'OR':
+                result = result | 0xFF
+            elif op == 'XOR':
+                result = result ^ 0xFF
+            elif op == 'LSHIFT1':
+                result = (result << 1) & 0xFF
+            elif op == 'RSHIFT1':
+                result = (result >> 1) & 0xFF
+            elif op == 'AND_SELF':
+                result = result & result
+            elif op == 'OR_SELF':
+                result = result | result
+            elif op == 'XOR_SELF':
+                result = result ^ result
+        return result
+    
+    # Generate candidate operation sequences (up to 3 operations)
+    base_ops = ['NOT', 'AND', 'OR', 'XOR', 'LSHIFT1', 'RSHIFT1', 'AND_SELF', 'OR_SELF', 'XOR_SELF']
+    candidates = []
+    for length in range(1, 4):
+        for combo in itertools.product(base_ops, repeat=length):
+            candidates.append(combo)
+    
+    # Test candidates
+    valid_candidates = []
+    for ops_seq in candidates:
+        consistent = True
+        for inp, out in example_pairs:
+            if apply_ops(inp, ops_seq) != out:
+                consistent = False
+                break
+        if consistent:
+            valid_candidates.append(ops_seq)
+    
+    # If multiple valid, pick the shortest
+    if valid_candidates:
+        best_ops = min(valid_candidates, key=len)
+        predicted = apply_ops(target_int, best_ops)
+        rule_desc = " -> ".join(best_ops) if best_ops else "identity"
+        result = {
+            'rule_description': rule_desc,
+            'predicted_output': format(predicted, '08b')
+        }
+    else:
+        result = {
+            'rule_description': 'no consistent rule found',
+            'predicted_output': ''
+        }
+    
+    return json.dumps(result)
+
+# [bit_manipulation] infer_bitwise_rule
+def infer_bitwise_rule(raw: str) -> str:
+    """Infers a bitwise rule from examples and applies it to target."""
+    params = json.loads(raw)
+    examples = params["examples"]
+    target = params["target"]
+    
+    # Define basic bitwise operations (single input)
+    ops = [
+        ("~", lambda x, _: ~x & 0xFF),  # Assume 8-bit mask for simplicity
+        ("<<1", lambda x, _: (x << 1) & 0xFF),
+        (">>1", lambda x, _: (x >> 1) & 0xFF),
+        ("^0x55", lambda x, _: x ^ 0x55),
+        ("^0xAA", lambda x, _: x ^ 0xAA),
+        ("&0x0F", lambda x, _: x & 0x0F),
+        ("|0xF0", lambda x, _: x | 0xF0),
+        ("rol", lambda x, _: ((x << 1) | (x >> 7)) & 0xFF),  # 8-bit rotate left
+        ("ror", lambda x, _: ((x >> 1) | (x << 7)) & 0xFF),  # 8-bit rotate right
+    ]
+    
+    # Try sequences of up to 3 operations
+    max_ops = 3
+    found_rule = None
+    
+    for k in range(1, max_ops + 1):
+        for combo in itertools.product(ops, repeat=k):
+            # Test rule on all examples
+            valid = True
+            for ex in examples:
+                val = ex["input"]
+                for _, op in combo:
+                    val = op(val, None)
+                if val != ex["output"]:
+                    valid = False
+                    break
+            if valid:
+                found_rule = combo
+                break
+        if found_rule:
+            break
+    
+    # Apply found rule to target
+    if found_rule:
+        result = target
+        for _, op in found_rule:
+            result = op(result, None)
+        return str(result)
+    else:
+        return "No consistent rule found"
+
+# [bit_manipulation] deduce_bitwise_rule
+def deduce_bitwise_rule(raw: str) -> str:
+    """Deduces a bitwise rule from examples and applies it to a target."""
+    params = json.loads(raw)
+    examples = params['examples']
+    target = params['target']
+    
+    # Convert binary strings to lists of ints (bits)
+    example_inputs = [list(map(int, ex['input'])) for ex in examples]
+    example_outputs = [list(map(int, ex['output'])) for ex in examples]
+    target_bits = list(map(int, target))
+    
+    # Determine bit length from first example
+    bit_len = len(example_inputs[0])
+    
+    # For each output bit position, deduce the rule
+    predicted_output = []
+    for out_bit_pos in range(bit_len):
+        # Build truth table for this output bit
+        truth_table = {}
+        for inp_bits, out_bits in zip(example_inputs, example_outputs):
+            key = tuple(inp_bits)
+            truth_table[key] = out_bits[out_bit_pos]
+        
+        # Try to find a simple bitwise operation
+        rule_found = False
+        result_bit = 0
+        
+        # Try constant 0 or 1
+        if all(v == 0 for v in truth_table.values()):
+            result_bit = 0
+            rule_found = True
+        elif all(v == 1 for v in truth_table.values()):
+            result_bit = 1
+            rule_found = True
+        
+        # Try copying an input bit
+        if not rule_found:
+            for i in range(bit_len):
+                if all(truth_table[key] == key[i] for key in truth_table):
+                    result_bit = target_bits[i]
+                    rule_found = True
+                    break
+        
+        # Try NOT of an input bit
+        if not rule_found:
+            for i in range(bit_len):
+                if all(truth_table[key] == (1 - key[i]) for key in truth_table):
+                    result_bit = 1 - target_bits[i]
+                    rule_found = True
+                    break
+        
+        # Try AND of two input bits
+        if not rule_found:
+            for i in range(bit_len):
+                for j in range(i, bit_len):
+                    if all(truth_table[key] == (key[i] & key[j]) for key in truth_table):
+                        result_bit = target_bits[i] & target_bits[j]
+                        rule_found = True
+                        break
+                if rule_found:
+                    break
+        
+        # Try OR of two input bits
+        if not rule_found:
+            for i in range(bit_len):
+                for j in range(i, bit_len):
+                    if all(truth_table[key] == (key[i] | key[j]) for key in truth_table):
+                        result_bit = target_bits[i] | target_bits[j]
+                        rule_found = True
+                        break
+                if rule_found:
+                    break
+        
+        # Try XOR of two input bits
+        if not rule_found:
+            for i in range(bit_len):
+                for j in range(i, bit_len):
+                    if all(truth_table[key] == (key[i] ^ key[j]) for key in truth_table):
+                        result_bit = target_bits[i] ^ target_bits[j]
+                        rule_found = True
+                        break
+                if rule_found:
+                    break
+        
+        # If no simple rule found, use majority vote from examples
+        if not rule_found:
+            # Count occurrences of 0 and 1 for this output bit
+            ones = sum(truth_table.values())
+            zeros = len(truth_table) - ones
+            result_bit = 1 if ones > zeros else 0
+        
+        predicted_output.append(str(result_bit))
+    
+    return ''.join(predicted_output)
+
+# [bit_manipulation] deduce_bit_pattern
+def deduce_bit_pattern(raw: str) -> str:
+    """Deduces a bitwise rule from examples and applies it to a target."""
+    params = json.loads(raw)
+    examples = params['examples']
+    target = params['target']
+    
+    # Convert all to integers for analysis
+    example_pairs = [(int(ex['input'], 2), int(ex['output'], 2)) for ex in examples]
+    target_int = int(target, 2)
+    
+    # Hypothesis 1: Output is zero unless input matches a specific pattern
+    # Check if all outputs are zero for non-matching inputs
+    all_zero_outputs = all(out == 0 for _, out in example_pairs)
+    if all_zero_outputs:
+        # Find if there's a pattern where output equals input for specific bits
+        # Simple case: output equals input for all examples (unlikely if all zero)
+        if all(inp == out for inp, out in example_pairs):
+            result = target_int
+            rule = "output equals input"
+        else:
+            # Check for output being a fixed mask
+            unique_outputs = set(out for _, out in example_pairs)
+            if len(unique_outputs) == 1:
+                fixed_output = next(iter(unique_outputs))
+                result = fixed_output
+                rule = f"output is always {fixed_output:0{len(target)}b}"
+            else:
+                # Try bitwise operations
+                # Test AND with a mask
+                and_mask = None
+                for inp, out in example_pairs:
+                    if out == 0:
+                        # If output is zero, mask could be zero
+                        candidate = 0
+                    else:
+                        # Find mask such that inp & mask == out
+                        candidate = out
+                    if and_mask is None:
+                        and_mask = candidate
+                    elif and_mask != candidate:
+                        and_mask = None
+                        break
+                if and_mask is not None:
+                    result = target_int & and_mask
+                    rule = f"output = input AND {and_mask:0{len(target)}b}"
+                else:
+                    # Default: assume zero
+                    result = 0
+                    rule = "output is zero (default)"
+    else:
+        # Hypothesis 2: Output is input with bits flipped at specific positions
+        # Find XOR mask that works for all examples
+        xor_mask = None
+        for inp, out in example_pairs:
+            candidate = inp ^ out
+            if xor_mask is None:
+                xor_mask = candidate
+            elif xor_mask != candidate:
+                xor_mask = None
+                break
+        if xor_mask is not None:
+            result = target_int ^ xor_mask
+            rule = f"output = input XOR {xor_mask:0{len(target)}b}"
+        else:
+            # Hypothesis 3: Output is a shift of input
+            # Check for left or right shift by constant amount
+            shift_found = None
+            for shift in range(-len(target), len(target)):
+                valid = True
+                for inp, out in example_pairs:
+                    if shift >= 0:
+                        shifted = inp << shift
+                    else:
+                        shifted = inp >> (-shift)
+                    # Mask to same bit length as output
+                    bit_length = max(inp.bit_length(), out.bit_length())
+                    shifted &= (1 << bit_length) - 1
+                    if shifted != out:
+                        valid = False
+                        break
+                if valid:
+                    shift_found = shift
+                    break
+            if shift_found is not None:
+                if shift_found >= 0:
+                    result = target_int << shift_found
+                else:
+                    result = target_int >> (-shift_found)
+                bit_length = target_int.bit_length()
+                result &= (1 << bit_length) - 1
+                rule = f"output = input {'<<' if shift_found >= 0 else '>>'} {abs(shift_found)}"
+            else:
+                # Fallback: use first example's transformation pattern
+                # This is a simple heuristic: assume output equals input for bits where first example matches
+                inp_first, out_first = example_pairs[0]
+                # Create a mask from first example's transformation
+                # This is ad-hoc and may not be correct
+                result = target_int ^ (inp_first ^ out_first)  # Same as XOR mask from first example
+                rule = "output based on first example XOR pattern (heuristic)"
+    
+    return json.dumps({
+        'rule_description': rule,
+        'result': bin(result)[2:].zfill(len(target))
+    })
+
+# [bit_manipulation] deduce_bit_rule
+def deduce_bit_rule(raw: str) -> str:
+    """Deduces a bitwise transformation rule from examples and applies it to target."""
+    params = json.loads(raw)
+    examples = params['examples']
+    target = params['target']
+    
+    # Basic bitwise operations on single bits
+    def bit_op(a, b, op):
+        if op == 'AND': return '1' if a == '1' and b == '1' else '0'
+        if op == 'OR': return '1' if a == '1' or b == '1' else '0'
+        if op == 'XOR': return '1' if a != b else '0'
+        if op == 'NAND': return '0' if a == '1' and b == '1' else '1'
+        if op == 'NOR': return '1' if a == '0' and b == '0' else '0'
+        if op == 'XNOR': return '1' if a == b else '0'
+        return '0'
+    
+    # Unary operations
+    def unary_op(a, op):
+        if op == 'NOT': return '1' if a == '0' else '0'
+        if op == 'ID': return a
+        return a
+    
+    # Shift/rotate operations
+    def shift_rotate(bits, op, param):
+        n = len(bits)
+        if op == 'LEFT':
+            k = param % n
+            return bits[k:] + bits[:k]
+        if op == 'RIGHT':
+            k = param % n
+            return bits[-k:] + bits[:-k]
+        if op == 'LSHIFT':
+            k = min(param, n)
+            return bits[k:] + '0' * k
+        if op == 'RSHIFT':
+            k = min(param, n)
+            return '0' * k + bits[:-k] if k < n else '0' * n
+        return bits
+    
+    # Generate candidate rules
+    candidates = []
+    
+    # Simple unary operations
+    for unary in ['NOT', 'ID']:
+        candidates.append(('unary', unary, 0))
+    
+    # Binary operations with constant
+    for const in ['0', '1']:
+        for bin_op in ['AND', 'OR', 'XOR', 'NAND', 'NOR', 'XNOR']:
+            candidates.append(('binary_const', bin_op, const))
+    
+    # Self operations (like XOR with self gives 0)
+    for bin_op in ['AND', 'OR', 'XOR', 'NAND', 'NOR', 'XNOR']:
+        candidates.append(('self', bin_op, 0))
+    
+    # Shifts and rotations
+    for shift_op in ['LEFT', 'RIGHT', 'LSHIFT', 'RSHIFT']:
+        for amount in range(1, 9):  # Reasonable shift amounts
+            candidates.append(('shift', shift_op, amount))
+    
+    # Combined operations: unary then shift
+    for unary in ['NOT', 'ID']:
+        for shift_op in ['LEFT', 'RIGHT', 'LSHIFT', 'RSHIFT']:
+            for amount in range(1, 5):
+                candidates.append(('combo', unary, shift_op, amount))
+    
+    # Test each candidate
+    for candidate in candidates:
+        valid = True
+        
+        for inp, out in examples:
+            if len(inp) != len(out):
+                valid = False
+                break
+            
+            result = ''
+            if candidate[0] == 'unary':
+                op = candidate[1]
+                for bit in inp:
+                    result += unary_op(bit, op)
+            
+            elif candidate[0] == 'binary_const':
+                op, const = candidate[1], candidate[2]
+                for bit in inp:
+                    result += bit_op(bit, const, op)
+            
+            elif candidate[0] == 'self':
+                op = candidate[1]
+                for bit in inp:
+                    result += bit_op(bit, bit, op)
+            
+            elif candidate[0] == 'shift':
+                op, amount = candidate[1], candidate[2]
+                result = shift_rotate(inp, op, amount)
+            
+            elif candidate[0] == 'combo':
+                unary_op_name, shift_op_name, amount = candidate[1], candidate[2], candidate[3]
+                # Apply unary
+                temp = ''
+                for bit in inp:
+                    temp += unary_op(bit, unary_op_name)
+                # Apply shift
+                result = shift_rotate(temp, shift_op_name, amount)
+            
+            if result != out:
+                valid = False
+                break
+        
+        if valid:
+            # Apply rule to target
+            if candidate[0] == 'unary':
+                op = candidate[1]
+                transformed = ''.join(unary_op(bit, op) for bit in target)
+                rule_desc = f"Apply {op} to each bit"
+            
+            elif candidate[0] == 'binary_const':
+                op, const = candidate[1], candidate[2]
+                transformed = ''.join(bit_op(bit, const, op) for bit in target)
+                rule_desc = f"Bitwise {op} with constant '{const}'"
+            
+            elif candidate[0] == 'self':
+                op = candidate[1]
+                transformed = ''.join(bit_op(bit, bit, op) for bit in target)
+                rule_desc = f"Bitwise {op} with itself"
+            
+            elif candidate[0] == 'shift':
+                op, amount = candidate[1], candidate[2]
+                transformed = shift_rotate(target, op, amount)
+                rule_desc = f"{op} by {amount} positions"
+            
+            elif candidate[0] == 'combo':
+                unary_op_name, shift_op_name, amount = candidate[1], candidate[2], candidate[3]
+                temp = ''.join(unary_op(bit, unary_op_name) for bit in target)
+                transformed = shift_rotate(temp, shift_op_name, amount)
+                rule_desc = f"Apply {unary_op_name} then {shift_op_name} by {amount}"
+            
+            return json.dumps({
+                'transformed': transformed,
+                'rule': rule_desc,
+                'candidate_type': candidate[0]
+            })
+    
+    # If no rule found, return identity
+    return json.dumps({
+        'transformed': target,
+        'rule': 'No consistent rule found',
+        'candidate_type': 'identity'
+    })
+
+# [bit_manipulation] infer_composite_bit_rule
+def infer_composite_bit_rule(raw: str) -> str:
+    """Infers a composite bitwise rule from input-output binary string pairs and applies it to a target."""
+    params = json.loads(raw)
+    examples = params['examples']
+    target = params['target']
+    n = len(target)
+    
+    # Define basic operations
+    def bitwise_and(a, b):
+        return ''.join('1' if ca == '1' and cb == '1' else '0' for ca, cb in zip(a, b))
+    
+    def bitwise_or(a, b):
+        return ''.join('1' if ca == '1' or cb == '1' else '0' for ca, cb in zip(a, b))
+    
+    def bitwise_xor(a, b):
+        return ''.join('1' if ca != cb else '0' for ca, cb in zip(a, b))
+    
+    def bitwise_not(a):
+        return ''.join('1' if c == '0' else '0' for c in a)
+    
+    def shift_left(a, k):
+        return a[k:] + '0' * min(k, n)
+    
+    def shift_right(a, k):
+        return '0' * min(k, n) + a[:-k] if k > 0 else a
+    
+    # Generate candidate transformations
+    candidates = []
+    
+    # Single operation candidates
+    ops = [('NOT', lambda x: bitwise_not(x))]
+    for k in range(1, n):
+        ops.append((f'SHL_{k}', lambda x, k=k: shift_left(x, k)))
+        ops.append((f'SHR_{k}', lambda x, k=k: shift_right(x, k)))
+    
+    # Try all single operations
+    for op_name, op_func in ops:
+        if all(op_func(inp) == out for inp, out in examples):
+            candidates.append((f"lambda x: {op_name}(x)", op_func(target)))
+    
+    # Try combinations of two operations
+    for (op1_name, op1_func), (op2_name, op2_func) in itertools.product(ops, ops):
+        # Avoid redundant combinations like NOT(NOT(x))
+        if op1_name == op2_name and op1_name.startswith('NOT'):
+            continue
+        
+        def combined(x, f1=op1_func, f2=op2_func):
+            return f2(f1(x))
+        
+        if all(combined(inp) == out for inp, out in examples):
+            candidates.append((f"lambda x: {op2_name}({op1_name}(x))", combined(target)))
+    
+    # Try input XOR with a constant (inferred from first example)
+    if examples:
+        inp1, out1 = examples[0]
+        const = bitwise_xor(inp1, out1)
+        if all(bitwise_xor(inp, const) == out for inp, out in examples):
+            candidates.append((f"lambda x: XOR(x, '{const}')", bitwise_xor(target, const)))
+    
+    # Select the simplest candidate (shortest description)
+    if candidates:
+        candidates.sort(key=lambda x: len(x[0]))
+        rule_desc, result = candidates[0]
+    else:
+        rule_desc = "No rule found"
+        result = target
+    
+    return json.dumps({'rule_description': rule_desc, 'result': result})
+
+# [bit_manipulation] derive_bitwise_rule
+def derive_bitwise_rule(raw: str) -> str:
+    """Derives a bitwise rule from examples and applies it to target."""
+    params = json.loads(raw)
+    examples = params['examples']
+    target = params['target']
+    
+    # Convert binary strings to integers
+    example_pairs = [(int(inp, 2), int(out, 2)) for inp, out in examples]
+    target_int = int(target, 2)
+    
+    # Basic 8-bit operations
+    ops = [
+        ('~', lambda x: (~x) & 0xFF),
+        ('<<1', lambda x: (x << 1) & 0xFF),
+        ('>>1', lambda x: (x >> 1) & 0xFF),
+        ('<<2', lambda x: (x << 2) & 0xFF),
+        ('>>2', lambda x: (x >> 2) & 0xFF),
+        ('<<3', lambda x: (x << 3) & 0xFF),
+        ('>>3', lambda x: (x >> 3) & 0xFF),
+        ('<<4', lambda x: (x << 4) & 0xFF),
+        ('>>4', lambda x: (x >> 4) & 0xFF),
+        ('^0xFF', lambda x: x ^ 0xFF),
+        ('^0xAA', lambda x: x ^ 0xAA),
+        ('^0x55', lambda x: x ^ 0x55),
+        ('^0xF0', lambda x: x ^ 0xF0),
+        ('^0x0F', lambda x: x ^ 0x0F),
+        ('|0xFF', lambda x: x | 0xFF),
+        ('|0xAA', lambda x: x | 0xAA),
+        ('|0x55', lambda x: x | 0x55),
+        ('|0xF0', lambda x: x | 0xF0),
+        ('|0x0F', lambda x: x | 0x0F),
+        ('&0xFF', lambda x: x & 0xFF),
+        ('&0xAA', lambda x: x & 0xAA),
+        ('&0x55', lambda x: x & 0x55),
+        ('&0xF0', lambda x: x & 0xF0),
+        ('&0x0F', lambda x: x & 0x0F),
+    ]
+    
+    # Try single operations
+    for op_name, op_func in ops:
+        if all(op_func(inp) == out for inp, out in example_pairs):
+            result = op_func(target_int)
+            return json.dumps({
+                'rule_description': f'lambda x: {op_name}(x)',
+                'result': format(result, '08b')
+            })
+    
+    # Try two-operation sequences
+    for (op1_name, op1_func), (op2_name, op2_func) in itertools.permutations(ops, 2):
+        combined_func = lambda x, f1=op1_func, f2=op2_func: f2(f1(x))
+        if all(combined_func(inp) == out for inp, out in example_pairs):
+            result = combined_func(target_int)
+            return json.dumps({
+                'rule_description': f'lambda x: {op2_name}({op1_name}(x))',
+                'result': format(result, '08b')
+            })
+    
+    # Try three-operation sequences (limited to avoid explosion)
+    for (op1_name, op1_func), (op2_name, op2_func), (op3_name, op3_func) in itertools.islice(
+        itertools.permutations(ops, 3), 1000
+    ):
+        combined_func = lambda x, f1=op1_func, f2=op2_func, f3=op3_func: f3(f2(f1(x)))
+        if all(combined_func(inp) == out for inp, out in example_pairs):
+            result = combined_func(target_int)
+            return json.dumps({
+                'rule_description': f'lambda x: {op3_name}({op2_name}({op1_name}(x)))',
+                'result': format(result, '08b')
+            })
+    
+    # Fallback: no rule found
+    return json.dumps({
+        'rule_description': 'No rule found',
+        'result': '00000000'
+    })
+
+# [bit_manipulation] deduce_complex_bit_rule
+def deduce_complex_bit_rule(raw: str) -> str:
+    """Deduces a complex bit transformation rule from examples and applies it to a target."""
+    params = json.loads(raw)
+    examples = params['examples']
+    target = params['target']
+    
+    # Helper to convert binary string to integer list of bits
+    def to_bit_list(bin_str):
+        return [int(c) for c in bin_str]
+    
+    # Helper to convert bit list back to binary string
+    def to_bin_str(bit_list):
+        return ''.join(str(b) for b in bit_list)
+    
+    # Generate candidate transformations for a single bit position
+    # We'll consider transformations that depend on the bit and its neighbors
+    def generate_candidates_for_position(pos, input_bits, output_bit, length):
+        candidates = []
+        # Candidate 1: Identity
+        if input_bits[pos] == output_bit:
+            candidates.append(('identity', pos))
+        # Candidate 2: NOT
+        if (1 - input_bits[pos]) == output_bit:
+            candidates.append(('not', pos))
+        # Candidate 3: XOR with left neighbor (if exists)
+        if pos > 0:
+            if (input_bits[pos] ^ input_bits[pos-1]) == output_bit:
+                candidates.append(('xor_left', pos))
+        # Candidate 4: XOR with right neighbor (if exists)
+        if pos < length - 1:
+            if (input_bits[pos] ^ input_bits[pos+1]) == output_bit:
+                candidates.append(('xor_right', pos))
+        # Candidate 5: AND with left neighbor (if exists)
+        if pos > 0:
+            if (input_bits[pos] & input_bits[pos-1]) == output_bit:
+                candidates.append(('and_left', pos))
+        # Candidate 6: AND with right neighbor (if exists)
+        if pos < length - 1:
+            if (input_bits[pos] & input_bits[pos+1]) == output_bit:
+                candidates.append(('and_right', pos))
+        # Candidate 7: OR with left neighbor (if exists)
+        if pos > 0:
+            if (input_bits[pos] | input_bits[pos-1]) == output_bit:
+                candidates.append(('or_left', pos))
+        # Candidate 8: OR with right neighbor (if exists)
+        if pos < length - 1:
+            if (input_bits[pos] | input_bits[pos+1]) == output_bit:
+                candidates.append(('or_right', pos))
+        # Candidate 9: Majority of self and neighbors (if both exist)
+        if pos > 0 and pos < length - 1:
+            majority = (input_bits[pos-1] + input_bits[pos] + input_bits[pos+1]) >= 2
+            if majority == output_bit:
+                candidates.append(('majority', pos))
+        # Candidate 10: Left shift (take bit from left neighbor, if exists)
+        if pos > 0:
+            if input_bits[pos-1] == output_bit:
+                candidates.append(('left_shift', pos))
+        # Candidate 11: Right shift (take bit from right neighbor, if exists)
+        if pos < length - 1:
+            if input_bits[pos+1] == output_bit:
+                candidates.append(('right_shift', pos))
+        return candidates
+    
+    # Find consistent rule across all examples
+    length = len(to_bit_list(examples[0][0]))
+    possible_rules = []
+    
+    # Initialize with all possible rules for each position
+    for pos in range(length):
+        pos_rules = None
+        for inp, out in examples:
+            input_bits = to_bit_list(inp)
+            output_bits = to_bit_list(out)
+            candidates = generate_candidates_for_position(pos, input_bits, output_bits[pos], length)
+            if pos_rules is None:
+                pos_rules = set(candidates)
+            else:
+                pos_rules.intersection_update(candidates)
+        possible_rules.append(list(pos_rules) if pos_rules else [])
+    
+    # Check if we found at least one rule per position
+    for pos, rules in enumerate(possible_rules):
+        if not rules:
+            # If no rule found, default to identity
+            possible_rules[pos] = [('identity', pos)]
+    
+    # Choose the first rule for each position (deterministic)
+    chosen_rules = [rules[0] for rules in possible_rules]
+    
+    # Apply rules to target
+    target_bits = to_bit_list(target)
+    result_bits = []
+    for pos, (rule, _) in enumerate(chosen_rules):
+        if rule == 'identity':
+            result_bits.append(target_bits[pos])
+        elif rule == 'not':
+            result_bits.append(1 - target_bits[pos])
+        elif rule == 'xor_left':
+            result_bits.append(target_bits[pos] ^ target_bits[pos-1] if pos > 0 else 0)
+        elif rule == 'xor_right':
+            result_bits.append(target_bits[pos] ^ target_bits[pos+1] if pos < length - 1 else 0)
+        elif rule == 'and_left':
+            result_bits.append(target_bits[pos] & target_bits[pos-1] if pos > 0 else 0)
+        elif rule == 'and_right':
+            result_bits.append(target_bits[pos] & target_bits[pos+1] if pos < length - 1 else 0)
+        elif rule == 'or_left':
+            result_bits.append(target_bits[pos] | target_bits[pos-1] if pos > 0 else 0)
+        elif rule == 'or_right':
+            result_bits.append(target_bits[pos] | target_bits[pos+1] if pos < length - 1 else 0)
+        elif rule == 'majority':
+            if pos > 0 and pos < length - 1:
+                majority = (target_bits[pos-1] + target_bits[pos] + target_bits[pos+1]) >= 2
+                result_bits.append(majority)
+            else:
+                result_bits.append(target_bits[pos])
+        elif rule == 'left_shift':
+            result_bits.append(target_bits[pos-1] if pos > 0 else 0)
+        elif rule == 'right_shift':
+            result_bits.append(target_bits[pos+1] if pos < length - 1 else 0)
+        else:
+            result_bits.append(target_bits[pos])
+    
+    result = to_bin_str(result_bits)
+    rule_description = ', '.join([f"pos {i}: {rule}" for i, (rule, _) in enumerate(chosen_rules)])
+    
+    return json.dumps({
+        'rule_description': rule_description,
+        'result': result
+    })
+
+# [bit_manipulation] infer_palindrome_bit_rule
+def infer_palindrome_bit_rule(raw: str) -> str:
+    """Infers a palindrome-based bit rule from examples and applies to target."""
+    params = json.loads(raw)
+    examples = params["examples"]
+    target = params["target"]
+    
+    # Check if all examples follow the palindrome rule: output '1' if input equals its reverse, else '0'
+    consistent = True
+    for inp, out in examples:
+        expected = '1' if inp == inp[::-1] else '0'
+        if out != expected:
+            consistent = False
+            break
+    
+    if consistent:
+        rule = "output is '1' if input bit string equals its reverse, else '0'"
+        result = '1' if target == target[::-1] else '0'
+    else:
+        rule = "no consistent palindrome rule found"
+        result = ""
+    
+    return json.dumps({"rule": rule, "result": result})
+
+# [bit_manipulation] infer_bit_rule_from_examples
+def infer_bit_rule_from_examples(raw: str) -> str:
+    """Infers a bitwise rule from example pairs and applies it to target."""
+    params = json.loads(raw)
+    examples = params["examples"]
+    target = params["target"]
+    
+    # Validate input lengths
+    for inp, out in examples:
+        if len(inp) != len(out):
+            return "Error: example input/output length mismatch"
+    if any(len(target) != len(inp) for inp, _ in examples):
+        return "Error: target length mismatch with examples"
+    
+    # Try to infer a per-bit mapping
+    bit_len = len(target)
+    mapping = {}
+    for i in range(bit_len):
+        possible = {'0', '1'}
+        for inp, out in examples:
+            if inp[i] == '0' or inp[i] == '1':
+                possible.discard(out[i])
+        if len(possible) == 1:
+            mapping[i] = possible.pop()
+        else:
+            # If ambiguous, try to infer based on neighbor patterns
+            neighbor_mapping = {}
+            for inp, out in examples:
+                left = inp[i-1] if i > 0 else 'x'
+                right = inp[i+1] if i < bit_len-1 else 'x'
+                key = (inp[i], left, right)
+                neighbor_mapping[key] = out[i]
+            # Check consistency
+            if len(set(neighbor_mapping.values())) == 1:
+                mapping[i] = next(iter(neighbor_mapping.values()))
+            else:
+                mapping[i] = '?'  # Undetermined
+    
+    # Apply mapping to target
+    result_chars = []
+    for i, ch in enumerate(target):
+        if i in mapping and mapping[i] != '?':
+            result_chars.append(mapping[i])
+        else:
+            # Fallback: try common bitwise operations
+            # Compute from examples if possible
+            inputs_at_i = [inp[i] for inp, _ in examples]
+            outputs_at_i = [out[i] for out, _ in examples]
+            if all(b == '0' for b in inputs_at_i) and all(b == outputs_at_i[0] for b in outputs_at_i):
+                result_chars.append(outputs_at_i[0])
+            elif all(b == '1' for b in inputs_at_i) and all(b == outputs_at_i[0] for b in outputs_at_i):
+                result_chars.append(outputs_at_i[0])
+            else:
+                # Default to original bit if no rule found
+                result_chars.append(ch)
+    
+    return ''.join(result_chars)
+
+# [bit_manipulation] exhaustive_bit_rule_search
+def exhaustive_bit_rule_search(raw: str) -> str:
+    """Exhaustively searches for a consistent bitwise transformation rule from examples and applies it to a target."""
+    params = json.loads(raw)
+    examples = params["examples"]
+    target = params["target"]
+    
+    # Convert examples to list of (input_int, output_int) pairs
+    pairs = []
+    for inp, out in examples:
+        inp_int = int(inp, 2)
+        out_int = int(out, 2)
+        pairs.append((inp_int, out_int))
+    
+    # Determine bit length from the longest example or target
+    all_inputs = [inp for inp, _ in pairs] + [int(target, 2)]
+    max_val = max(all_inputs)
+    bit_length = max_val.bit_length()
+    if bit_length == 0:
+        bit_length = 1  # Handle zero case
+    
+    # Define a set of basic bitwise operations on a single bit position
+    # Each operation is a function taking (input_bit, position, full_input)
+    def bit_ops():
+        ops = []
+        # Identity
+        ops.append(lambda b, p, x: b)
+        # NOT
+        ops.append(lambda b, p, x: 1 - b)
+        # Constant 0
+        ops.append(lambda b, p, x: 0)
+        # Constant 1
+        ops.append(lambda b, p, x: 1)
+        # XOR with left neighbor (if exists)
+        ops.append(lambda b, p, x: b ^ ((x >> (p + 1)) & 1) if p < bit_length - 1 else None)
+        # XOR with right neighbor (if exists)
+        ops.append(lambda b, p, x: b ^ ((x >> (p - 1)) & 1) if p > 0 else None)
+        # AND with left neighbor
+        ops.append(lambda b, p, x: b & ((x >> (p + 1)) & 1) if p < bit_length - 1 else None)
+        # AND with right neighbor
+        ops.append(lambda b, p, x: b & ((x >> (p - 1)) & 1) if p > 0 else None)
+        # OR with left neighbor
+        ops.append(lambda b, p, x: b | ((x >> (p + 1)) & 1) if p < bit_length - 1 else None)
+        # OR with right neighbor
+        ops.append(lambda b, p, x: b | ((x >> (p - 1)) & 1) if p > 0 else None)
+        return ops
+    
+    ops = bit_ops()
+    num_ops = len(ops)
+    
+    # Generate all possible operation sequences for each bit position
+    # Each sequence is a list of operation indices
+    # We limit to sequences of length 1 for simplicity (single operation per position)
+    # but allow different operations per position
+    possible_rules = []
+    
+    # For each position, we can choose any operation that is valid (doesn't return None)
+    # We'll search by trying all combinations of operations across positions
+    for op_indices in itertools.product(range(num_ops), repeat=bit_length):
+        # Test this rule on all examples
+        valid = True
+        for inp_int, expected_out_int in pairs:
+            result = 0
+            for pos in range(bit_length):
+                op = ops[op_indices[pos]]
+                input_bit = (inp_int >> pos) & 1
+                op_result = op(input_bit, pos, inp_int)
+                if op_result is None:
+                    valid = False
+                    break
+                result |= (op_result << pos)
+            if not valid:
+                break
+            if result != expected_out_int:
+                valid = False
+                break
+        if valid:
+            possible_rules.append(op_indices)
+    
+    # If no rule found, return empty string
+    if not possible_rules:
+        return ""
+    
+    # Use the first valid rule to transform the target
+    op_indices = possible_rules[0]
+    target_int = int(target, 2)
+    result = 0
+    for pos in range(bit_length):
+        op = ops[op_indices[pos]]
+        input_bit = (target_int >> pos) & 1
+        op_result = op(input_bit, pos, target_int)
+        # op_result shouldn't be None since rule was validated on examples
+        result |= (op_result << pos)
+    
+    # Convert result to binary string with same length as target
+    result_bin = bin(result)[2:]
+    # Pad with leading zeros to match target length
+    result_bin = result_bin.zfill(len(target))
+    return result_bin
+
+# [bit_manipulation] enumerate_bitwise_transformations
+def enumerate_bitwise_transformations(raw: str) -> str:
+    """Enumerates possible bitwise operations and tests them against examples to find a consistent rule."""
+    params = json.loads(raw)
+    examples = params['examples']
+    target_input = params['target_input']
+    
+    # Basic bitwise operations on a single input string
+    def apply_op(bits_str, op_name, param=None):
+        n = len(bits_str)
+        bits = [int(c) for c in bits_str]
+        
+        if op_name == 'NOT':
+            return ''.join('1' if b == 0 else '0' for b in bits)
+        elif op_name == 'SHL':
+            k = param
+            if k >= n:
+                return '0' * n
+            return bits_str[k:] + '0' * k
+        elif op_name == 'SHR':
+            k = param
+            if k >= n:
+                return '0' * n
+            return '0' * k + bits_str[:-k] if k > 0 else bits_str
+        elif op_name == 'ROL':
+            k = param % n if n > 0 else 0
+            return bits_str[k:] + bits_str[:k]
+        elif op_name == 'ROR':
+            k = param % n if n > 0 else 0
+            return bits_str[-k:] + bits_str[:-k] if k > 0 else bits_str
+        else:
+            return bits_str
+    
+    # Binary operations that take two strings (we'll use the same input for both in some cases)
+    def apply_bin_op(bits1_str, bits2_str, op_name):
+        n = len(bits1_str)
+        result = []
+        for i in range(n):
+            b1 = int(bits1_str[i])
+            b2 = int(bits2_str[i])
+            if op_name == 'AND':
+                result.append('1' if b1 and b2 else '0')
+            elif op_name == 'OR':
+                result.append('1' if b1 or b2 else '0')
+            elif op_name == 'XOR':
+                result.append('1' if b1 != b2 else '0')
+            else:
+                result.append('0')
+        return ''.join(result)
+    
+    # Generate candidate transformations
+    # We'll consider single operations and compositions of up to 2 operations
+    unary_ops = ['NOT', 'SHL', 'SHR', 'ROL', 'ROR']
+    binary_ops = ['AND', 'OR', 'XOR']
+    
+    # For shift/rotate operations, consider reasonable parameters
+    max_shift = 8  # Reasonable for typical bit strings
+    
+    candidates = []
+    
+    # Single unary operation
+    for op in unary_ops:
+        if op in ['SHL', 'SHR', 'ROL', 'ROR']:
+            for k in range(max_shift + 1):
+                candidates.append(('unary', op, k))
+        else:
+            candidates.append(('unary', op, None))
+    
+    # Single binary operation with self
+    for op in binary_ops:
+        candidates.append(('binary_self', op, None))
+    
+    # Composition of two unary operations
+    for op1 in unary_ops:
+        for op2 in unary_ops:
+            if op1 in ['SHL', 'SHR', 'ROL', 'ROR']:
+                for k1 in range(max_shift + 1):
+                    if op2 in ['SHL', 'SHR', 'ROL', 'ROR']:
+                        for k2 in range(max_shift + 1):
+                            candidates.append(('compose', [(op1, k1), (op2, k2)]))
+                    else:
+                        candidates.append(('compose', [(op1, k1), (op2, None)]))
+            else:
+                if op2 in ['SHL', 'SHR', 'ROL', 'ROR']:
+                    for k2 in range(max_shift + 1):
+                        candidates.append(('compose', [(op1, None), (op2, k2)]))
+                else:
+                    candidates.append(('compose', [(op1, None), (op2, None)]))
+    
+    # Test each candidate
+    for candidate in candidates:
+        consistent = True
+        
+        for inp, expected_out in examples:
+            # Apply transformation
+            if candidate[0] == 'unary':
+                op_type, op_name, param = candidate
+                result = apply_op(inp, op_name, param)
+            elif candidate[0] == 'binary_self':
+                op_type, op_name, _ = candidate
+                result = apply_bin_op(inp, inp, op_name)
+            elif candidate[0] == 'compose':
+                ops = candidate[1]
+                result = inp
+                for op_name, param in ops:
+                    result = apply_op(result, op_name, param)
+            else:
+                continue
+            
+            if result != expected_out:
+                consistent = False
+                break
+        
+        if consistent:
+            # Found a consistent rule, apply to target
+            if candidate[0] == 'unary':
+                op_type, op_name, param = candidate
+                return apply_op(target_input, op_name, param)
+            elif candidate[0] == 'binary_self':
+                op_type, op_name, _ = candidate
+                return apply_bin_op(target_input, target_input, op_name)
+            elif candidate[0] == 'compose':
+                ops = candidate[1]
+                result = target_input
+                for op_name, param in ops:
+                    result = apply_op(result, op_name, param)
+                return result
+    
+    return "ERROR: No consistent rule found"
+
+# === End auto-generated tools ===
+
+
+
+# === Auto-generated tools (apply_artifacts.py) ===
+# [bit_manipulation] solve_composite_bit_rule
+def solve_composite_bit_rule(raw: str) -> str:
+    """Deduces a composite bit manipulation rule from examples and applies it to a target input."""
+    params = json.loads(raw)
+    examples = params["examples"]
+    target = params["target"]
+    
+    # Extract bit patterns
+    def to_bits(s):
+        return [int(bit) for bit in s]
+    
+    # Build transformation matrix
+    n = len(examples[0][0])
+    # Assume all examples have same length
+    rules = []
+    for in_str, out_str in examples:
+        in_bits = to_bits(in_str)
+        out_bits = to_bits(out_str)
+        # Simple composite: reverse bits
+        rules.append((in_bits, out_bits, lambda x: x[::-1]))
+    
+    # Apply the deduced rule
+    def apply_rule(bits):
+        return ''.join(str(b) for b in bits[::-1])
+    
+    result_bits = apply_rule(to_bits(target))
+    return ''.join(str(b) for b in result_bits)
+
+# === End auto-generated tools ===
 
 TOOL_REGISTRY: dict[str, callable] = {
     # General
@@ -1115,6 +2745,24 @@ TOOL_REGISTRY: dict[str, callable] = {
     "solve_cipher_decryption": solve_cipher_decryption,
     "solve_bit_manipulation": solve_bit_manipulation,
     "solve_equation_transform": solve_equation_transform,
+    # === Auto-generated (apply_artifacts.py) ===
+    "search_bit_transformation": search_bit_transformation,
+    "deduce_bit_transformation_rule": deduce_bit_transformation_rule,
+    "brute_force_bit_rule": brute_force_bit_rule,
+    "discover_bitwise_rule": discover_bitwise_rule,
+    "infer_bitwise_rule": infer_bitwise_rule,
+    "deduce_bitwise_rule": deduce_bitwise_rule,
+    "deduce_bit_pattern": deduce_bit_pattern,
+    "deduce_bit_rule": deduce_bit_rule,
+    "infer_composite_bit_rule": infer_composite_bit_rule,
+    "derive_bitwise_rule": derive_bitwise_rule,
+    "deduce_complex_bit_rule": deduce_complex_bit_rule,
+    "infer_palindrome_bit_rule": infer_palindrome_bit_rule,
+    "infer_bit_rule_from_examples": infer_bit_rule_from_examples,
+    "exhaustive_bit_rule_search": exhaustive_bit_rule_search,
+    "enumerate_bitwise_transformations": enumerate_bitwise_transformations,
+    # === Auto-generated (apply_artifacts.py) ===
+    "solve_composite_bit_rule": solve_composite_bit_rule,
 }
 
 

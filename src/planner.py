@@ -86,6 +86,52 @@ N1  id=solve_bits      tool=solve_bit_manipulation
 N1  id=solve_equation  tool=solve_equation_transform
     tool_input = {"prompt": "__PROMPT__"}
 
+
+=== bit_manipulation (reward=1.0) ===
+Input: PUZZLE_TYPE: bit_manipulation
+Output:
+MERMAID:
+START --> solve_bits
+solve_bits --> END
+
+NODES:
+{"solve_bits": {"id": "solve_bits", "question": "Solve the bit manipulation puzzle by analyzing examples and applying the rule to the target input.", "tool": "solve_bit_manipulation", "tool_input": "{\"prompt\": \"__PROMPT__\"}"}}
+
+
+=== bit_manipulation (reward=1.0) ===
+Input: PUZZLE_TYPE: bit_manipulation
+Output:
+MERMAID:
+START --> solve_bits
+solve_bits --> END
+
+NODES:
+{"solve_bits": {"id": "solve_bits", "question": "Solve the bit manipulation puzzle by analyzing examples and applying the rule to the target input.", "tool": "solve_bit_manipulation", "tool_input": "{\"prompt\": \"__PROMPT__\"}"}}
+
+
+=== bit_manipulation (reward=1.0) ===
+Input: PUZZLE_TYPE: bit_manipulation
+Output:
+MERMAID:
+START --> solve_bits
+solve_bits --> END
+
+NODES:
+{"solve_bits": {"id": "solve_bits", "question": "Solve the bit manipulation puzzle by analyzing examples and applying the rule to the target input.", "tool": "solve_bit_manipulation", "tool_input": "{\"prompt\": \"__PROMPT__\"}"}}
+
+
+FEW-SHOT EXAMPLES OF CORRECT PLANS:
+
+=== bit_manipulation (reward=1.0) ===
+Input: PUZZLE_TYPE: bit_manipulation
+Output:
+MERMAID:
+START --> solve_bits
+solve_bits --> END
+
+NODES:
+{"solve_bits": {"id": "solve_bits", "question": "Solve the bit manipulation puzzle by analyzing examples and applying the rule to the target input.", "tool": "solve_bit_manipulation", "tool_input": "{\"prompt\": \"__PROMPT__\"}"}}
+
 RULES:
 - Match the plan to PUZZLE_TYPE exactly.
 - Use the EXACT tool names and node IDs shown above.
@@ -104,6 +150,56 @@ KNOWN_TYPES = frozenset({
 
 
 # ── Planner output parser ───────────────────────────────────────────
+
+def _parse_nodes_loose(json_blob: str) -> dict[str, dict]:
+    """Best-effort parser for nearly-valid NODES output.
+
+    Local SFT adapters sometimes learn the right node shape but emit
+    ``tool_input`` as an unescaped JSON string, e.g.
+    ``"tool_input": "{"prompt": "..."}"``. Strict JSON parsing fails there,
+    but the node metadata is still recoverable.
+    """
+    node_key_match = re.search(r'"([^"]+)"\s*:\s*\{', json_blob)
+    node_id_match = re.search(r'"id"\s*:\s*"([^"]+)"', json_blob)
+    tool_match = re.search(r'"tool"\s*:\s*"([^"]+)"', json_blob)
+    question_match = re.search(r'"question"\s*:\s*"([^"]*)"', json_blob)
+
+    if not node_id_match or not tool_match:
+        raise ValueError("Could not recover node metadata from malformed NODES JSON")
+
+    node_id = node_id_match.group(1)
+    tool = tool_match.group(1)
+    node_key = node_key_match.group(1) if node_key_match else node_id
+    question = question_match.group(1) if question_match else ""
+
+    tool_input = ""
+    if "__PROMPT__" in json_blob or "PROMPT:" in json_blob:
+        tool_input = '{"prompt": "__PROMPT__"}'
+    else:
+        tool_input_match = re.search(
+            r'"tool_input"\s*:\s*("(?:\\.|[^"\\])*"|\{.*?\})',
+            json_blob,
+            re.DOTALL,
+        )
+        if tool_input_match:
+            tool_input = tool_input_match.group(1)
+            if tool_input.startswith('"') and tool_input.endswith('"'):
+                try:
+                    tool_input = json.loads(tool_input)
+                except json.JSONDecodeError:
+                    pass
+    if not tool_input and tool == "solve_bit_manipulation":
+        tool_input = '{"prompt": "__PROMPT__"}'
+
+    return {
+        node_key: {
+            "id": node_id,
+            "question": question,
+            "tool": tool,
+            "tool_input": tool_input,
+        }
+    }
+
 
 def _parse_planner_output(
     raw: str,
@@ -161,7 +257,10 @@ def _parse_planner_output(
         open_b = json_blob.count("{") - json_blob.count("}")
         open_s = json_blob.count("[") - json_blob.count("]")
         repaired = json_blob + ("}" * max(open_b, 0)) + ("]" * max(open_s, 0))
-        parsed, _ = json.JSONDecoder().raw_decode(repaired)
+        try:
+            parsed, _ = json.JSONDecoder().raw_decode(repaired)
+        except json.JSONDecodeError:
+            parsed = _parse_nodes_loose(json_blob)
 
     if isinstance(parsed, list):
         nodes_dict: dict[str, dict] = {}
